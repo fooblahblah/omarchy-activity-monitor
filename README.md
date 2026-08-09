@@ -4,6 +4,8 @@ Third-party Omarchy bar plugin for a fast system overview and an expandable
 process monitor. It is self-contained under the user plugin directory, so
 normal packaged Quattro updates do not replace it.
 
+![Expanded Activity Monitor panel with live resource and process data](preview.png)
+
 ## Install
 
 ```bash
