@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly helper=/usr/lib/stappmus-activity-monitor/activity-stats
+
+[[ $# -eq 0 ]] || exit 64
+[[ -x $helper ]] || exit 77
+exec sudo -n /usr/lib/stappmus-activity-monitor/activity-stats --activity-process-power-reader

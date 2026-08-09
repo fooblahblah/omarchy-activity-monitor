@@ -1,0 +1,198 @@
+#!/usr/bin/python
+
+# omarchy:summary=Collect process statistics for Activity Monitor
+# omarchy:group=system
+# omarchy:args=[--reader]
+
+"""Emit lightweight process snapshots from procfs."""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Iterable
+
+
+PF_KTHREAD = 0x00200000
+
+
+def positive_setting(name: str, fallback: int) -> int:
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
+PROC_PATH = os.environ.get("OMARCHY_SYSTEM_STATS_PROC_PATH", "/proc")
+PASSWD_PATH = os.environ.get("OMARCHY_SYSTEM_STATS_PASSWD_PATH", "/etc/passwd")
+CLOCK_TICKS = positive_setting(
+    "OMARCHY_SYSTEM_STATS_CLOCK_TICKS", os.sysconf("SC_CLK_TCK")
+)
+PAGE_SIZE = positive_setting(
+    "OMARCHY_SYSTEM_STATS_PAGE_SIZE", os.sysconf("SC_PAGE_SIZE")
+)
+PAGE_KIB = max(1, PAGE_SIZE // 1024)
+
+
+def sanitized(value: bytes) -> str:
+    return (
+        value.decode("utf-8", errors="replace")
+        .replace("\t", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
+
+def user_names() -> dict[str, str]:
+    result: dict[str, str] = {}
+    try:
+        with open(PASSWD_PATH, "rb") as passwd:
+            for line in passwd:
+                fields = line.rstrip(b"\n").split(b":")
+                if len(fields) < 3 or not fields[2].isdigit():
+                    continue
+                result[fields[2].decode("ascii")] = sanitized(fields[0])
+    except OSError:
+        pass
+    return result
+
+
+def uptime_sample() -> str:
+    try:
+        with open(os.path.join(PROC_PATH, "uptime"), "rb") as uptime:
+            value = uptime.read().split(maxsplit=1)[0].decode("ascii")
+        float(value)
+        return value
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return "0"
+
+
+def system_busy_ticks() -> int:
+    try:
+        with open(os.path.join(PROC_PATH, "stat"), "rb") as stat:
+            fields = stat.readline().split()
+        if len(fields) < 9 or fields[0] != b"cpu":
+            return 0
+        # user and nice include guest time. Sum only the non-duplicated busy
+        # counters: user, nice, system, irq, softirq, and steal.
+        return sum(int(fields[index]) for index in (1, 2, 3, 6, 7, 8))
+    except (OSError, ValueError):
+        return 0
+
+
+def process_directories() -> Iterable[tuple[int, str]]:
+    excluded = {os.getpid(), os.getppid()}
+    try:
+        with os.scandir(PROC_PATH) as entries:
+            processes = [
+                (int(entry.name), entry.path)
+                for entry in entries
+                if entry.name.isdecimal() and int(entry.name) not in excluded
+            ]
+    except OSError:
+        return ()
+    processes.sort(key=lambda entry: entry[0])
+    return processes
+
+
+def status_values(path: str, resident_kib: int) -> tuple[str, int]:
+    uid = ""
+    found_uid = False
+    found_resident = False
+    try:
+        with open(os.path.join(path, "status"), "rb") as status:
+            for line in status:
+                if line.startswith(b"Uid:"):
+                    fields = line.split()
+                    if len(fields) > 1 and fields[1].isdigit():
+                        uid = fields[1].decode("ascii")
+                        found_uid = True
+                elif line.startswith(b"VmRSS:"):
+                    fields = line.split()
+                    if len(fields) > 1 and fields[1].isdigit():
+                        resident_kib = int(fields[1])
+                        found_resident = True
+                if found_uid and found_resident:
+                    break
+    except OSError:
+        pass
+    return uid, resident_kib
+
+
+def process_row(
+    expected_pid: int, path: str, users: dict[str, str]
+) -> str | None:
+    try:
+        with open(os.path.join(path, "stat"), "rb") as stat:
+            raw = stat.read()
+    except OSError:
+        return None
+
+    command_start = raw.find(b"(")
+    command_end = raw.rfind(b") ")
+    if command_start < 1 or command_end <= command_start:
+        return None
+
+    try:
+        pid = int(raw[:command_start].strip())
+        fields = raw[command_end + 2 :].split()
+        if pid != expected_pid or len(fields) < 22:
+            return None
+        flags = int(fields[6])
+        if flags & PF_KTHREAD:
+            return None
+        state = fields[0].decode("ascii")
+        cpu_ticks = int(fields[11]) + int(fields[12])
+        start_ticks = int(fields[19])
+        resident_kib = int(fields[21]) * PAGE_KIB
+    except (UnicodeError, ValueError):
+        return None
+
+    if len(state) != 1 or cpu_ticks < 0 or start_ticks <= 0 or resident_kib < 0:
+        return None
+
+    uid, resident_kib = status_values(path, resident_kib)
+    user = users.get(uid, uid)
+    name = sanitized(raw[command_start + 1 : command_end])
+    return (
+        f"process\t{pid}\t{user}\t{state}\t{start_ticks}\t"
+        f"{cpu_ticks}\t{resident_kib}\t{name}"
+    )
+
+
+def snapshot() -> str:
+    lines = [
+        "schema\tactivity-processes\t1",
+        f"sample\t{uptime_sample()}\t{CLOCK_TICKS}\t{system_busy_ticks()}",
+    ]
+    users = user_names()
+    for pid, path in process_directories():
+        row = process_row(pid, path, users)
+        if row is not None:
+            lines.append(row)
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    arguments = sys.argv[1:]
+    if not arguments:
+        sys.stdout.write(snapshot())
+        return
+    if arguments != ["--reader"]:
+        print("Usage: activity-process-stats [--reader]", file=sys.stderr)
+        raise SystemExit(64)
+
+    try:
+        for request in sys.stdin:
+            if request.rstrip("\r\n") != "sample":
+                continue
+            sys.stdout.write(snapshot())
+            sys.stdout.write("snapshot-end\tprocesses\n")
+            sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

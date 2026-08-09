@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "id": "stappmus.activity-monitor",
+  "name": "Activity Monitor",
+  "version": "1.0.0",
+  "author": "Kristoffer Haugland",
+  "license": "MIT",
+  "description": "Low-overhead system activity, storage, processes, and estimated CPU-package power share",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Activity Monitor",
+    "description": "A quick system overview with expandable resources, storage, processes, and estimated per-process CPU-package power share.",
+    "category": "System",
+    "aliases": [
+      "activity",
+      "system-monitor",
+      "btop"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalMs": 1500,
+      "processRefreshIntervalMs": 3000,
+      "thermalRefreshIntervalMs": 10000,
+      "storageRefreshIntervalMs": 30000,
+      "historySamples": 60
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalMs",
+        "type": "integer",
+        "label": "Refresh interval (milliseconds)",
+        "min": 500,
+        "max": 10000,
+        "step": 250,
+        "defaultValue": 1500
+      },
+      {
+        "key": "processRefreshIntervalMs",
+        "type": "integer",
+        "label": "Process refresh interval (milliseconds)",
+        "min": 1000,
+        "max": 15000,
+        "step": 500,
+        "defaultValue": 3000
+      },
+      {
+        "key": "thermalRefreshIntervalMs",
+        "type": "integer",
+        "label": "Thermal refresh interval (milliseconds)",
+        "min": 3000,
+        "max": 60000,
+        "step": 1000,
+        "defaultValue": 10000
+      },
+      {
+        "key": "storageRefreshIntervalMs",
+        "type": "integer",
+        "label": "Storage refresh interval (milliseconds)",
+        "min": 10000,
+        "max": 120000,
+        "step": 5000,
+        "defaultValue": 30000
+      },
+      {
+        "key": "historySamples",
+        "type": "integer",
+        "label": "History samples",
+        "min": 20,
+        "max": 240,
+        "step": 10,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

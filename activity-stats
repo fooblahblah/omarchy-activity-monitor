@@ -1,0 +1,505 @@
+#!/bin/bash
+
+# omarchy:summary=Print system activity stats for the shell
+# omarchy:group=system
+# omarchy:args=[--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-process-power|--activity-process-power-reader|--activity-storage]
+
+bar_widget_stats() {
+  awk '
+    NR == 1 {
+      idle = $5
+      total = 0
+      for (i = 2; i <= NF; i++) total += $i
+      printf "cpu\t%s\t%s\n", idle, total
+    }
+  ' /proc/stat
+
+  awk '
+    /^MemTotal:/ { total = $2 }
+    /^MemAvailable:/ { avail = $2 }
+    END {
+      if (total > 0) printf "memory\t%.2f\n", ((total - avail) / total) * 100
+    }
+  ' /proc/meminfo
+
+  awk '{ print "load\t" $1 }' /proc/loadavg
+}
+
+activity_temperature_sensor_cache=""
+activity_temperature_chip_cache=""
+activity_temperature_label_cache=""
+activity_temperature_sys_path_cache=""
+
+activity_temperature_rows() {
+  local sys_path="$1"
+  local hwmon input sensor_id label_file
+  local chip chip_lower label label_lower value rank
+  local best_sensor="" best_chip="" best_label="" best_value="0" best_rank="100"
+
+  # The CPU sensor topology is effectively static during a desktop session.
+  # Reuse the selected sysfs input in reader mode and rescan only if it
+  # disappears or stops returning a sane temperature.
+  if [[ $activity_temperature_sys_path_cache == "$sys_path" &&
+        -n $activity_temperature_sensor_cache ]]; then
+    input="$sys_path/class/hwmon/$activity_temperature_sensor_cache"
+    if [[ -r $input ]] &&
+        read -r value <"$input" 2>/dev/null &&
+        [[ $value =~ ^-?[0-9]+$ ]] &&
+        (( value > 0 && value < 150000 )); then
+      printf 'temperature\t%s\t%s\t%s\t%s\n' \
+        "${activity_temperature_sensor_cache%_input}" \
+        "$activity_temperature_chip_cache" \
+        "$activity_temperature_label_cache" \
+        "$value"
+      return 0
+    fi
+    activity_temperature_sensor_cache=""
+    activity_temperature_chip_cache=""
+    activity_temperature_label_cache=""
+    activity_temperature_sys_path_cache=""
+  fi
+
+  for hwmon in "$sys_path"/class/hwmon/hwmon*; do
+    [[ -d $hwmon ]] || continue
+    chip="unknown"
+    [[ -r $hwmon/name ]] && read -r chip <"$hwmon/name" 2>/dev/null
+    chip_lower="${chip,,}"
+
+    for input in "$hwmon"/temp*_input; do
+      [[ -r $input ]] || continue
+      read -r value <"$input" 2>/dev/null || continue
+      [[ $value =~ ^-?[0-9]+$ ]] || continue
+      (( value > 0 && value < 150000 )) || continue
+
+      label_file="${input%_input}_label"
+      label="$chip"
+      [[ -r $label_file ]] && read -r label <"$label_file" 2>/dev/null
+      label_lower="${label,,}"
+      rank=100
+      if [[ $chip_lower == "coretemp" && $label_lower == *"package id"* ]]; then
+        rank=0
+      elif [[ $chip_lower == "k10temp" && $label_lower == "tctl" ]]; then
+        rank=1
+      elif [[ $label_lower == *"cpu"* || $label_lower == *"package"* || $label_lower == "tctl" ]]; then
+        rank=2
+      elif [[ $chip_lower == "coretemp" || $chip_lower == "k10temp" ]]; then
+        rank=3
+      fi
+      (( rank < 100 )) || continue
+      if (( rank < best_rank || (rank == best_rank && value > best_value) )); then
+        sensor_id="${input%_input}"
+        best_sensor="${sensor_id#"$sys_path"/class/hwmon/}"
+        best_chip="$chip"
+        best_label="$label"
+        best_value="$value"
+        best_rank="$rank"
+      fi
+    done
+  done
+
+  (( best_rank < 100 )) || return 0
+  best_chip="${best_chip//$'\t'/ }"
+  best_chip="${best_chip//$'\r'/ }"
+  best_label="${best_label//$'\t'/ }"
+  best_label="${best_label//$'\r'/ }"
+  activity_temperature_sensor_cache="${best_sensor}_input"
+  activity_temperature_chip_cache="$best_chip"
+  activity_temperature_label_cache="$best_label"
+  activity_temperature_sys_path_cache="$sys_path"
+  printf 'temperature\t%s\t%s\t%s\t%s\n' \
+    "$best_sensor" "$best_chip" "$best_label" "$best_value"
+}
+
+activity_thermal_stats() {
+  local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
+  local sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
+  local sample="0"
+  [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
+
+  printf 'schema\tactivity-thermals\t1\n'
+  printf 'sample\t%s\n' "$sample"
+  activity_temperature_rows "$sys_path"
+}
+
+activity_storage_stats() {
+  local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
+  local storage_path="${OMARCHY_SYSTEM_STATS_ROOT_PATH:-/}"
+  local sample="0"
+  local stat_fields block_size blocks free_blocks available_blocks
+  local used_blocks total_bytes used_bytes available_bytes
+
+  [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
+  printf 'schema\tactivity-storage\t1\n'
+  printf 'sample\t%s\n' "$sample"
+
+  # A single statfs call provides internally consistent capacity figures.
+  # Use free blocks to calculate used space, while available blocks reflects
+  # what an unprivileged desktop user can still allocate.
+  stat_fields=$(LC_ALL=C stat -f -c $'%S\t%b\t%f\t%a' -- "$storage_path" 2>/dev/null) ||
+    return 0
+  IFS=$'\t' read -r block_size blocks free_blocks available_blocks <<<"$stat_fields"
+  [[ $block_size =~ ^[0-9]+$ && $blocks =~ ^[0-9]+$ ]] || return 0
+  [[ $free_blocks =~ ^[0-9]+$ && $available_blocks =~ ^[0-9]+$ ]] || return 0
+  (( block_size > 0 )) || return 0
+
+  (( free_blocks > blocks )) && free_blocks="$blocks"
+  (( available_blocks > blocks )) && available_blocks="$blocks"
+  used_blocks=$((blocks - free_blocks))
+  total_bytes=$((block_size * blocks))
+  used_bytes=$((block_size * used_blocks))
+  available_bytes=$((block_size * available_blocks))
+  printf 'storage\t/\t%s\t%s\t%s\n' \
+    "$total_bytes" "$used_bytes" "$available_bytes"
+}
+
+activity_process_power_stats() {
+  local proc_path="/proc"
+  local sys_path="/sys"
+  local sample="0"
+  local powercap_path zone zone_id zone_suffix zone_name energy maximum
+  local -A seen_zones=()
+
+  # This mode is designed for one exact sudoers command. A privileged
+  # invocation must never honor user-controlled fixture paths.
+  if (( EUID != 0 )); then
+    proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
+    sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
+  fi
+
+  [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
+  printf 'schema\tactivity-process-power\t1\n'
+  printf 'sample\t%s\n' "$sample"
+
+  powercap_path="$sys_path/class/powercap"
+  for zone in \
+    "$powercap_path"/*-rapl:[0-9]* \
+    "$powercap_path"/*-rapl/*-rapl:[0-9]*; do
+    [[ -d $zone ]] || continue
+    zone_id="${zone##*/}"
+    zone_suffix="${zone_id#*:}"
+    [[ $zone_suffix =~ ^[0-9]+$ ]] || continue
+    [[ -z ${seen_zones[$zone_id]:-} ]] || continue
+
+    # Use only the top-level processor package. Its subdomains and PSYS
+    # overlap it, while the MMIO control type is a duplicate access path.
+    [[ -r $zone/name ]] || continue
+    read -r zone_name <"$zone/name" 2>/dev/null || continue
+    zone_name="${zone_name,,}"
+    [[ $zone_name == "package" || $zone_name == package-* ]] || continue
+
+    energy=""
+    maximum=""
+    [[ -r $zone/energy_uj ]] && read -r energy <"$zone/energy_uj" 2>/dev/null
+    [[ -r $zone/max_energy_range_uj ]] &&
+      read -r maximum <"$zone/max_energy_range_uj" 2>/dev/null
+    [[ -z $energy || $energy =~ ^[0-9]+$ ]] || energy=""
+    [[ -z $maximum || $maximum =~ ^[0-9]+$ ]] || maximum=""
+
+    seen_zones["$zone_id"]=1
+    printf 'package\t%s\t%s\t%s\t%s\n' \
+      "$zone_id" "$zone_name" "$energy" "$maximum"
+  done
+}
+
+activity_stats() {
+  local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
+  local sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
+  local sample="0"
+  local block_stat
+  local -a block_stats=()
+  local -a snapshot_inputs=()
+  [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
+
+  printf 'schema\tactivity-resources\t1\n'
+  printf 'sample\t%s\n' "$sample"
+
+  for block_stat in "$sys_path"/class/block/*/stat; do
+    [[ -r $block_stat ]] && block_stats+=("$block_stat")
+  done
+  [[ -r $proc_path/stat ]] && snapshot_inputs+=("$proc_path/stat")
+  [[ -r $proc_path/meminfo ]] && snapshot_inputs+=("$proc_path/meminfo")
+  [[ -r $proc_path/loadavg ]] && snapshot_inputs+=("$proc_path/loadavg")
+  [[ -r $proc_path/net/route ]] && snapshot_inputs+=("$proc_path/net/route")
+  [[ -r $proc_path/net/dev ]] && snapshot_inputs+=("$proc_path/net/dev")
+  (( ${#snapshot_inputs[@]} + ${#block_stats[@]} > 0 )) || return 0
+
+  # Read the fast snapshot through one awk process. Besides avoiding repeated
+  # startup costs, this keeps the route decision ahead of network rows and
+  # filters block devices before they cross the shell/QML boundary.
+  LC_ALL=C awk \
+    -v stat_path="$proc_path/stat" \
+    -v meminfo_path="$proc_path/meminfo" \
+    -v loadavg_path="$proc_path/loadavg" \
+    -v route_path="$proc_path/net/route" \
+    -v netdev_path="$proc_path/net/dev" \
+    -v block_root="$sys_path/class/block/" \
+    -v net_root="$sys_path/class/net/" '
+      FILENAME == stat_path {
+        # user and nice already include guest time, so expose only the
+        # non-duplicated fields through steal.
+        if ($1 ~ /^cpu([0-9]+)?$/) {
+          total = 0
+          for (field = 2; field <= 9; field++) total += $field
+          printf "cpu\t%s\t%.0f\t%.0f\n", $1, total, $5 + $6
+        }
+        next
+      }
+
+      FILENAME == meminfo_path {
+        if ($1 == "MemTotal:") memory_total = $2
+        else if ($1 == "MemAvailable:") memory_available = $2
+        else if ($1 == "SwapTotal:") swap_total = $2
+        else if ($1 == "SwapFree:") swap_free = $2
+        next
+      }
+
+      FILENAME == loadavg_path {
+        split($4, tasks, "/")
+        printf "tasks\t%s\t%s\n", tasks[1], tasks[2]
+        next
+      }
+
+      FILENAME == route_path {
+        if (FNR > 1 && $2 == "00000000" && $8 == "00000000" &&
+            and(strtonum("0x" $4), 1)) {
+          current_metric = $7 + 0
+          if (!route_found || current_metric < route_metric) {
+            route_found = 1
+            route_metric = current_metric
+            default_interface = $1
+          }
+        }
+        next
+      }
+
+      FILENAME == netdev_path {
+        if (FNR <= 2) next
+        interface = $1
+        sub(/:$/, "", interface)
+        if (!interface || interface == "lo") next
+
+        state = "unknown"
+        state_path = net_root interface "/operstate"
+        if ((getline state_value < state_path) > 0) state = state_value
+        close(state_path)
+
+        physical = 0
+        device_path = net_root interface "/device/uevent"
+        if ((getline device_value < device_path) > 0) physical = 1
+        close(device_path)
+
+        printf "network\t%s\t%s\t%s\t%s\t%s\t%s\n",
+          interface, $2, $10, state,
+          interface == default_interface ? 1 : 0, physical
+        next
+      }
+
+      index(FILENAME, block_root) == 1 {
+        block_path = FILENAME
+        sub(/\/stat$/, "", block_path)
+        name = block_path
+        sub(/^.*\//, "", name)
+        if (name ~ /^(loop|ram|zram)/) next
+
+        partition_path = block_path "/partition"
+        is_partition = (getline partition_value < partition_path) > 0
+        close(partition_path)
+        if (is_partition) next
+
+        device_path = block_path "/device/uevent"
+        physical = (getline device_value < device_path) > 0
+        close(device_path)
+        if (!physical) next
+
+        major_minor = ""
+        dev_path = block_path "/dev"
+        if ((getline dev_value < dev_path) > 0) major_minor = dev_value
+        close(dev_path)
+
+        printf "disk\t%s\t%s\t%s\t%s\n",
+          major_minor, name, $3, $7
+      }
+
+      ENDFILE {
+        if (FILENAME == meminfo_path) {
+          printf "memory\t%s\t%s\t%s\t%s\n",
+            memory_total, memory_available, swap_total, swap_free
+        }
+      }
+    ' \
+    "${snapshot_inputs[@]}" \
+    "${block_stats[@]}"
+
+  return 0
+}
+
+activity_process_collector="${BASH_SOURCE[0]%/*}/activity-process-stats"
+activity_process_reader_pid=""
+activity_process_reader_input=""
+activity_process_reader_output=""
+
+activity_process_stats() {
+  if [[ ! -x $activity_process_collector ]]; then
+    echo "Activity Monitor process collector is missing: $activity_process_collector" >&2
+    return 1
+  fi
+  "$activity_process_collector"
+}
+
+activity_process_reader_stop() {
+  if [[ $activity_process_reader_input =~ ^[0-9]+$ ]]; then
+    { exec {activity_process_reader_input}>&-; } 2>/dev/null || true
+  fi
+  if [[ $activity_process_reader_output =~ ^[0-9]+$ ]]; then
+    { exec {activity_process_reader_output}<&-; } 2>/dev/null || true
+  fi
+  if [[ $activity_process_reader_pid =~ ^[0-9]+$ ]]; then
+    wait "$activity_process_reader_pid" 2>/dev/null || true
+  fi
+
+  activity_process_reader_pid=""
+  activity_process_reader_input=""
+  activity_process_reader_output=""
+}
+
+activity_process_reader_start() {
+  activity_process_reader_stop
+  if [[ ! -x $activity_process_collector ]]; then
+    echo "Activity Monitor process collector is missing: $activity_process_collector" >&2
+    return 1
+  fi
+  coproc ACTIVITY_PROCESS_READER {
+    exec "$activity_process_collector" --reader
+  }
+  activity_process_reader_pid="$ACTIVITY_PROCESS_READER_PID"
+  activity_process_reader_input="${ACTIVITY_PROCESS_READER[1]}"
+  activity_process_reader_output="${ACTIVITY_PROCESS_READER[0]}"
+}
+
+activity_process_reader_snapshot_once() {
+  local line
+  local -a frame=()
+
+  printf 'sample\n' >&"$activity_process_reader_input" || return 1
+  while IFS= read -r -u "$activity_process_reader_output" line; do
+    if [[ $line == $'snapshot-end\tprocesses' ]]; then
+      (( ${#frame[@]} > 0 )) && printf '%s\n' "${frame[@]}"
+      return 0
+    fi
+    frame+=("$line")
+  done
+  return 1
+}
+
+activity_process_reader_snapshot() {
+  local attempt
+
+  for attempt in 1 2; do
+    if [[ ! $activity_process_reader_pid =~ ^[0-9]+$ ]]; then
+      activity_process_reader_start || continue
+    fi
+    activity_process_reader_snapshot_once && return 0
+    activity_process_reader_stop
+  done
+
+  # Keep the monitor useful if its long-lived helper cannot be started.
+  activity_process_stats
+}
+
+activity_reader() {
+  local request
+
+  while IFS= read -r request; do
+    case "$request" in
+      resources)
+        activity_stats
+        ;;
+      processes)
+        activity_process_reader_snapshot
+        ;;
+      thermals)
+        activity_thermal_stats
+        ;;
+      storage)
+        activity_storage_stats
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    printf 'snapshot-end\t%s\n' "$request"
+  done
+
+  activity_process_reader_stop
+}
+
+activity_process_power_reader() {
+  local request
+
+  while IFS= read -r request; do
+    [[ $request == "sample" ]] || continue
+    activity_process_power_stats
+    printf 'snapshot-end\tpower\n'
+  done
+}
+
+case "${1:-}" in
+  "")
+    ;;
+  --bar-widget)
+    bar_widget_stats
+    exit
+    ;;
+  --activity-reader)
+    activity_reader
+    exit
+    ;;
+  --activity-resources)
+    activity_stats
+    exit
+    ;;
+  --activity-processes)
+    activity_process_stats
+    exit
+    ;;
+  --activity-thermals)
+    activity_thermal_stats
+    exit
+    ;;
+  --activity-process-power)
+    activity_process_power_stats
+    exit
+    ;;
+  --activity-process-power-reader)
+    activity_process_power_reader
+    exit
+    ;;
+  --activity-storage)
+    activity_storage_stats
+    exit
+    ;;
+  *)
+    echo "Usage: activity-stats [--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-process-power|--activity-process-power-reader|--activity-storage]" >&2
+    exit 1
+    ;;
+esac
+
+cpu=$(top -bn1 | awk '/^%?Cpu/ {
+  gsub(/,/, "")
+  for (i = 1; i <= NF; i++) {
+    if ($(i + 1) == "id") {
+      printf "%.0f%%", 100 - $i
+      exit
+    }
+  }
+}')
+
+awk -v cpu="$cpu" '
+  /^MemTotal:/ { total = $2 }
+  /^MemAvailable:/ { avail = $2 }
+  END {
+    used = total - avail
+    printf "cpu\t%s\n", cpu
+    printf "memory\t%.1fGB / %.0fGB\n", used / 1024 / 1024, total / 1024 / 1024
+  }
+' /proc/meminfo
