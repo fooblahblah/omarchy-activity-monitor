@@ -394,7 +394,8 @@ grep -Fq 'Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
 [[ $(grep -Fc 'label: "RAM USAGE"' "$panel_file") -eq 2 ]] ||
   fail "activity panel does not distinguish used memory from cache"
 grep -Fq 'function memoryBreakdownText()' "$panel_file" &&
-  grep -Fq '" · CACHE " + Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
+  grep -Fq 'if (usedUnit && usedUnit === cacheUnit)' "$panel_file" &&
+  grep -Fq '" · CACHE " + cacheText' "$panel_file" ||
   fail "activity RAM card does not show used memory and cache together"
 grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
   fail "activity system details do not retain total RAM"

@@ -158,8 +158,14 @@ Panel {
 
   function memoryBreakdownText() {
     if (!snapshot.memory.total) return "USED — · CACHE —"
-    return "USED " + Model.formatBytes(snapshot.memory.total - snapshot.memory.available)
-      + " · CACHE " + Model.formatBytes(snapshot.memory.cached)
+    var usedText = Model.formatBytes(snapshot.memory.total - snapshot.memory.available)
+    var cacheText = Model.formatBytes(snapshot.memory.cached)
+    var usedSeparator = usedText.lastIndexOf(" ")
+    var cacheSeparator = cacheText.lastIndexOf(" ")
+    var usedUnit = usedSeparator >= 0 ? usedText.slice(usedSeparator + 1) : ""
+    var cacheUnit = cacheSeparator >= 0 ? cacheText.slice(cacheSeparator + 1) : ""
+    if (usedUnit && usedUnit === cacheUnit) usedText = usedText.slice(0, usedSeparator)
+    return "USED " + usedText + " · CACHE " + cacheText
   }
 
   function pressureColor(value) {
