@@ -16,6 +16,7 @@ function emptySnapshot() {
     memory: {
       total: 0,
       available: 0,
+      cached: 0,
       swapTotal: 0,
       swapFree: 0
     },
@@ -130,7 +131,8 @@ function parseSnapshot(raw) {
         total: number(fields[1]) * 1024,
         available: number(fields[2]) * 1024,
         swapTotal: number(fields[3]) * 1024,
-        swapFree: number(fields[4]) * 1024
+        swapFree: number(fields[4]) * 1024,
+        cached: number(fields[5]) * 1024
       }
     } else if (kind === "tasks") {
       snapshot.tasks = {

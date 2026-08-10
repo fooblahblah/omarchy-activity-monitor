@@ -250,6 +250,8 @@ activity_stats() {
         else if ($1 == "MemAvailable:") memory_available = $2
         else if ($1 == "SwapTotal:") swap_total = $2
         else if ($1 == "SwapFree:") swap_free = $2
+        else if ($1 == "Cached:") memory_cached = $2
+        else if ($1 == "SReclaimable:") memory_sreclaimable = $2
         next
       }
 
@@ -322,8 +324,9 @@ activity_stats() {
 
       ENDFILE {
         if (FILENAME == meminfo_path) {
-          printf "memory\t%s\t%s\t%s\t%s\n",
-            memory_total, memory_available, swap_total, swap_free
+          printf "memory\t%s\t%s\t%s\t%s\t%s\n",
+            memory_total, memory_available, swap_total, swap_free,
+            memory_cached + memory_sreclaimable
         }
       }
     ' \

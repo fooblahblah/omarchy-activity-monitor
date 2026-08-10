@@ -21,9 +21,14 @@ omarchy plugin disable stappmus.activity-monitor
 
 The compact panel shows CPU, memory, network and disk activity plus the three
 busiest processes. Expand it with the button or `e` for per-core activity,
-memory and swap details, disk storage used and remaining, search, process
-sorting, estimated CPU-package watts, and a larger process list. Your own apps can
-be asked to close from the expanded view after a confirmation.
+memory, reclaimable cache and swap details, disk storage used and remaining,
+search, process sorting, estimated CPU-package watts, and a larger process list.
+Your own apps can be asked to close from the expanded view after a confirmation.
+
+Overall RAM usage follows Linux's available-memory accounting:
+`(MemTotal - MemAvailable) / MemTotal`. The expanded `CACHE` value is
+`Cached + SReclaimable`, matching `free`'s cache column. These figures overlap
+because `MemAvailable` estimates cache that can be reclaimed.
 
 The expanded CPU card shows the measured total CPU-package watts. Individual
 process rows show their estimated share of that total.

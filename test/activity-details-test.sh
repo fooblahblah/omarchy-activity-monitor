@@ -272,7 +272,7 @@ mkdir -p \
 
 printf '321.50 100.00\n' >"$proc_path/uptime"
 printf 'cpu 100 0 50 800 10 5 5 0 0 0\ncpu0 50 0 25 400 5 2 3 0 0 0\n' >"$proc_path/stat"
-printf 'MemTotal: 1024 kB\nMemAvailable: 512 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' >"$proc_path/meminfo"
+printf 'MemTotal: 1024 kB\nMemAvailable: 512 kB\nCached: 128 kB\nSReclaimable: 32 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' >"$proc_path/meminfo"
 printf '0.50 0.25 0.10 1/100 123\n' >"$proc_path/loadavg"
 printf 'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\neth0\t00000000\t00000000\t0001\t0\t0\t25\t00000000\t0\t0\t0\n' \
   >"$proc_path/net/route"
@@ -368,6 +368,8 @@ resource_snapshot=$(
 )
 grep -Fxq $'schema\tactivity-resources\t1' <<<"$resource_snapshot" ||
   fail "activity resources output has its own schema"
+grep -Fxq $'memory\t1024\t512\t0\t0\t160' <<<"$resource_snapshot" ||
+  fail "activity resources output includes page cache and reclaimable slabs"
 grep -Fxq $'network\teth0\t1000\t2000\tup\t1\t1' <<<"$resource_snapshot" ||
   fail "activity resources do not follow an up default route without a gateway"
 if grep -q '^temperature' <<<"$resource_snapshot"; then

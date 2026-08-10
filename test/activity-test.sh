@@ -13,7 +13,7 @@ const first = activity.parseSnapshot([
   'cpu\tcpu\t1000\t700',
   'cpu\tcpu0\t500\t350',
   'cpu\tcpu1\t500\t350',
-  'memory\t1000\t400\t200\t150',
+  'memory\t1000\t400\t200\t150\t125',
   'tasks\t2\t100',
   'network\teth0\t10000\t20000\tup\t1\t1',
   'network\ttailscale0\t500000\t600000\tup\t0\t0',
@@ -23,6 +23,7 @@ const first = activity.parseSnapshot([
 
 assertEqual(first.sample, 1000, 'activity parses the monotonic resource sample')
 assertEqual(first.cores.length, 2, 'activity parses per-core counters')
+assertEqual(first.memory.cached, 125 * 1024, 'activity parses reclaimable cache')
 assertEqual(first.memory.swapTotal, 200 * 1024, 'activity parses swap counters')
 assertEqual(
   activity.parseSnapshot('schema\tactivity-processes\t1\nsample\t1000\n').schema,
@@ -36,7 +37,7 @@ const second = activity.parseSnapshot([
   'cpu\tcpu\t1200\t800',
   'cpu\tcpu0\t600\t390',
   'cpu\tcpu1\t600\t410',
-  'memory\t1000\t350\t200\t100',
+  'memory\t1000\t350\t200\t100\t120',
   'tasks\t3\t110',
   'network\teth0\t12048\t21024\tup\t1\t1',
   'network\ttailscale0\t900000\t1000000\tup\t0\t0',
@@ -388,6 +389,8 @@ grep -Fq 'showProcessUserColumn' "$panel_file" &&
   fail "activity process table does not adapt its optional columns on narrow screens"
 grep -Fq 'model: root.sortedProcesses' "$panel_file" ||
   fail "activity process table silently caps the virtualized process list"
+grep -Fq 'Model.formatBytes(root.snapshot.memory.cached)' "$panel_file" ||
+  fail "activity panel does not expose reclaimable memory cache"
 if grep -Fq 'text: "POWER"' "$panel_file"; then
   fail "activity presents estimated per-process power as an exact measurement"
 fi

@@ -622,12 +622,14 @@ Panel {
                         : "—"
                     },
                     {
-                      label: "SWAP",
-                      value: root.snapshot.memory.swapTotal ? root.percentText(root.metrics.swap) : "NONE"
+                      label: "CACHE",
+                      value: root.snapshot.memory.total
+                        ? Model.formatBytes(root.snapshot.memory.cached)
+                        : "—"
                     },
                     {
-                      label: "CORES",
-                      value: root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL" : "—"
+                      label: "SWAP",
+                      value: root.snapshot.memory.swapTotal ? root.percentText(root.metrics.swap) : "NONE"
                     },
                     {
                       label: "TASKS",
