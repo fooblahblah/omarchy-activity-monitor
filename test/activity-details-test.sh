@@ -321,7 +321,6 @@ intel_frequency="$gpu_devices/0000:00:02.0/tile0/gt0/freq0"
 amd_hwmon="$gpu_devices/0000:03:00.0/hwmon/hwmon0"
 
 mkdir -p \
-  "$fixture_root/bin" \
   "$proc_path/net" \
   "$fixture_root/root filesystem" \
   "$sys_path/class/block" \
@@ -349,7 +348,7 @@ mkdir -p \
 
 printf '321.50 100.00\n' >"$proc_path/uptime"
 printf 'cpu 100 0 50 800 10 5 5 0 0 0\ncpu0 50 0 25 400 5 2 3 0 0 0\n' >"$proc_path/stat"
-printf 'MemTotal: 1024 kB\nMemAvailable: 512 kB\nCached: 128 kB\nSReclaimable: 32 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' >"$proc_path/meminfo"
+printf 'MemTotal: 1024 kB\nHugePages_Total: 0\nMemAvailable: 512 kB\nCached: 128 kB\nSReclaimable: 32 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' >"$proc_path/meminfo"
 printf '0.50 0.25 0.10 1/100 123\n' >"$proc_path/loadavg"
 printf 'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\neth0\t00000000\t00000000\t0001\t0\t0\t25\t00000000\t0\t0\t0\n' \
   >"$proc_path/net/route"
@@ -403,32 +402,16 @@ printf '%s\n' \
   >"$proc_path/501/fdinfo/8"
 ln -s /dev/dri/renderD128 "$proc_path/501/fd/8"
 
-printf '%s\n' \
-  '#!/bin/bash' \
-  '[[ $1 == -f && $2 == -c && $4 == -- ]] || exit 64' \
-  '[[ $5 == "$OMARCHY_SYSTEM_STATS_EXPECTED_ROOT_PATH" ]] || exit 65' \
-  'printf '"'"'4096\t1000\t250\t200\n'"'" \
-  >"$fixture_root/bin/stat"
-chmod +x "$fixture_root/bin/stat"
-
-printf '%s\n' \
-  '#!/bin/bash' \
-  'printf "00000000:04:00.0, NVIDIA GeForce Fixture, 62, 2048, 8192, 1950\n"' \
-  >"$fixture_root/bin/nvidia-smi"
-chmod +x "$fixture_root/bin/nvidia-smi"
-
-printf '%s\n' \
-  '#!/bin/bash' \
-  '[[ $1 == info && $2 == --query=property && $3 == --path=/devices/virtual/dmi/id ]] || exit 64' \
-  'printf "MEMORY_DEVICE_0_SPEED_MTS=7200\nMEMORY_DEVICE_0_CONFIGURED_SPEED_GTS=6.4\n"' \
-  >"$fixture_root/bin/udevadm"
-chmod +x "$fixture_root/bin/udevadm"
+printf '4096\t1000\t250\t200\n' >"$fixture_root/statfs"
+printf '00000000:04:00.0\tNVIDIA GeForce Fixture\t62\t2147483648\t8589934592\t1950\n' \
+  >"$fixture_root/nvidia.tsv"
+printf 'E:MEMORY_DEVICE_0_SPEED_MTS=7200\nE:MEMORY_DEVICE_0_CONFIGURED_SPEED_GTS=6.4\n' \
+  >"$fixture_root/udev-data"
 
 storage_snapshot=$(
-  PATH="$fixture_root/bin:$PATH" \
-    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_ROOT_PATH="$fixture_root/root filesystem" \
-    OMARCHY_SYSTEM_STATS_EXPECTED_ROOT_PATH="$fixture_root/root filesystem" \
+    OMARCHY_SYSTEM_STATS_STATFS_FIXTURE_PATH="$fixture_root/statfs" \
     "$ROOT/activity-stats" --activity-storage
 )
 expected_storage=$'schema\tactivity-storage\t1\nsample\t321.50\nstorage\t/\t4096000\t3072000\t819200'
@@ -447,9 +430,9 @@ expected_thermals=$'schema\tactivity-thermals\t1\nsample\t321.50\ntemperature\th
 pass "activity CPU thermal output is exact and versioned"
 
 gpu_snapshot=$(
-  PATH="$fixture_root/bin:$PATH" \
-    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
+    OMARCHY_SYSTEM_STATS_NVIDIA_FIXTURE_PATH="$fixture_root/nvidia.tsv" \
     "$ROOT/activity-stats" --activity-gpus
 )
 grep -Fxq $'schema\tactivity-gpus\t1' <<<"$gpu_snapshot" ||
@@ -462,7 +445,7 @@ grep -Fxq $'gpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Radeon Fixture\t47\t268435456\t2
   fail "activity GPU output reads AMD busy, VRAM, and graphics clock counters"
 grep -Fxq $'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Fixture\t62\t2147483648\t8589934592\tvram\t1950' \
   <<<"$gpu_snapshot" ||
-  fail "activity GPU output reads NVIDIA utilization, VRAM, and graphics clock through nvidia-smi"
+  fail "activity GPU output reads NVIDIA utilization, VRAM, and graphics clock through persistent NVML"
 grep -Fxq $'gpu-memory\t0000:00:02.0\tshared\t100663296' <<<"$gpu_snapshot" ||
   fail "activity GPU output does not aggregate shared DRM memory"
 [[ $(grep -c $'^engine\t0000:00:02.0\t77\trcs\t' <<<"$gpu_snapshot") -eq 1 ]] ||
@@ -470,6 +453,64 @@ grep -Fxq $'gpu-memory\t0000:00:02.0\tshared\t100663296' <<<"$gpu_snapshot" ||
 [[ $(grep -c $'^engine\t0000:00:02.0\t78\trcs\t' <<<"$gpu_snapshot") -eq 1 ]] ||
   fail "activity GPU output loses a distinct DRM client"
 pass "activity GPU collector supports shared Intel, AMD, NVIDIA, and multiple adapters"
+
+read_gpu_frame() {
+  local output_fd="$1"
+  local result_name="$2"
+  local line
+  local -n result="$result_name"
+  result=""
+
+  while IFS= read -r -u "$output_fd" line; do
+    [[ $line == $'snapshot-end\tgpus' ]] && return 0
+    result+="$line"$'\n'
+  done
+  return 1
+}
+
+coproc GPU_READER {
+  exec env \
+    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+    OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
+    OMARCHY_SYSTEM_STATS_NVIDIA_FIXTURE_PATH="$fixture_root/nvidia.tsv" \
+    OMARCHY_SYSTEM_STATS_GPU_DISCOVERY_INTERVAL_MS=500 \
+    "$ROOT/activity-sampler" --activity-reader
+}
+gpu_reader_pid=$GPU_READER_PID
+gpu_reader_input=${GPU_READER[1]}
+gpu_reader_output=${GPU_READER[0]}
+printf 'gpus\n' >&"$gpu_reader_input"
+read_gpu_frame "$gpu_reader_output" first_gpu_frame ||
+  fail "activity GPU reader stopped before its first frame"
+
+mkdir -p "$proc_path/502/fd" "$proc_path/502/fdinfo"
+printf '%s\n' \
+  $'drm-driver:\txe' \
+  $'drm-client-id:\t79' \
+  $'drm-pdev:\t0000:00:02.0' \
+  $'drm-resident-gtt:\t16 MiB' \
+  $'drm-cycles-rcs:\t25' \
+  $'drm-total-cycles-rcs:\t1000' \
+  >"$proc_path/502/fdinfo/9"
+ln -s /dev/dri/renderD128 "$proc_path/502/fd/9"
+
+printf 'gpus\n' >&"$gpu_reader_input"
+read_gpu_frame "$gpu_reader_output" cached_gpu_frame ||
+  fail "activity GPU reader stopped during its cached frame"
+if grep -Fq $'engine\t0000:00:02.0\t79\t' <<<"$cached_gpu_frame"; then
+  fail "activity GPU reader rescanned every process file descriptor on every sample"
+fi
+
+sleep 0.55
+printf 'gpus\n' >&"$gpu_reader_input"
+read_gpu_frame "$gpu_reader_output" rediscovered_gpu_frame ||
+  fail "activity GPU reader stopped before its discovery refresh"
+exec {gpu_reader_input}>&-
+wait "$gpu_reader_pid"
+grep -Fq $'engine\t0000:00:02.0\t79\trcs\t25\t1000\t1\tcycles' \
+  <<<"$rediscovered_gpu_frame" ||
+  fail "activity GPU reader did not discover a new client after its cache interval"
+pass "activity GPU reader refreshes counters without rescanning process FDs every sample"
 
 read_thermal_frame() {
   local output_fd="$1"
@@ -518,9 +559,9 @@ grep -Fq $'temperature\thwmon1/temp1\tk10temp\tTctl\t55000' \
 pass "activity thermal reader caches and safely invalidates its CPU sensor"
 
 resource_snapshot=$(
-  PATH="$fixture_root/bin:$PATH" \
-    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
+    OMARCHY_SYSTEM_STATS_UDEV_DATA_PATH="$fixture_root/udev-data" \
     "$ROOT/activity-stats" --activity-resources
 )
 grep -Fxq $'schema\tactivity-resources\t1' <<<"$resource_snapshot" ||
@@ -540,9 +581,9 @@ pass "activity resources output avoids detailed sensor reads"
 
 rm -- "$proc_path/net/route"
 resource_without_route=$(
-  PATH="$fixture_root/bin:$PATH" \
-    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
+    OMARCHY_SYSTEM_STATS_UDEV_DATA_PATH="$fixture_root/udev-data" \
     "$ROOT/activity-stats" --activity-resources
 )
 grep -Fxq $'schema\tactivity-resources\t1' <<<"$resource_without_route" ||
@@ -572,7 +613,8 @@ psys_path="$powercap_path/intel-rapl:1"
 non_package_path="$powercap_path/intel-rapl:2"
 uncore_path="$powercap_path/intel-rapl:0:1"
 dram_path="$powercap_path/intel-rapl:0:2"
-mkdir -p "$psys_path" "$non_package_path" "$uncore_path" "$dram_path"
+mmio_package_path="$sys_path/class/powercap/intel-rapl-mmio/intel-rapl-mmio:0"
+mkdir -p "$psys_path" "$non_package_path" "$uncore_path" "$dram_path" "$mmio_package_path"
 printf 'psys\n' >"$psys_path/name"
 printf '8000000\n' >"$psys_path/energy_uj"
 printf '10000000\n' >"$psys_path/max_energy_range_uj"
@@ -585,6 +627,9 @@ printf '10000000\n' >"$uncore_path/max_energy_range_uj"
 printf 'dram\n' >"$dram_path/name"
 printf '5000000\n' >"$dram_path/energy_uj"
 printf '10000000\n' >"$dram_path/max_energy_range_uj"
+printf 'package-0\n' >"$mmio_package_path/name"
+printf '8000000\n' >"$mmio_package_path/energy_uj"
+printf '10000000\n' >"$mmio_package_path/max_energy_range_uj"
 
 process_power_snapshot=$(
   OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \

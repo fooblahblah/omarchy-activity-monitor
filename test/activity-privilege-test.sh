@@ -6,7 +6,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 sudoers_file="$ROOT/stappmus-activity-monitor.sudoers"
 launcher="$ROOT/activity-power-reader"
-expected='%wheel ALL=(root) NOPASSWD: /usr/lib/stappmus-activity-monitor/activity-stats --activity-process-power-reader'
+expected='%wheel ALL=(root) NOPASSWD: /usr/lib/stappmus-activity-monitor/activity-sampler --activity-process-power-reader'
 
 [[ -f $sudoers_file ]] ||
   fail "activity process power installs its narrow sudoers rule"
@@ -22,7 +22,7 @@ pass "activity process power sudoers rule permits only the exact collector comma
 
 [[ -x $launcher ]] ||
   fail "activity process power launcher is not executable"
-grep -Fxq 'exec sudo -n /usr/lib/stappmus-activity-monitor/activity-stats --activity-process-power-reader' "$launcher" ||
+grep -Fxq 'exec sudo -n /usr/lib/stappmus-activity-monitor/activity-sampler --activity-process-power-reader' "$launcher" ||
   fail "activity process power launcher does not invoke the exact guarded command"
 if grep -Eq '\$@|\$\*' "$launcher"; then
   fail "activity process power launcher forwards arbitrary command arguments"

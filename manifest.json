@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "stappmus.activity-monitor",
   "name": "Activity Monitor",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "author": "Kristoffer Haugland",
   "license": "MIT",
-  "description": "Low-overhead CPU, RAM, GPU, storage, process, and estimated CPU-package power monitoring",
+  "description": "Native low-overhead CPU, RAM, GPU, storage, process, and estimated CPU-package power monitoring",
   "kinds": [
     "bar-widget"
   ],

@@ -1,31 +1,38 @@
 # Maintainer: Kristoffer Haugland <stappmus at gmail dot com>
 
 pkgname=omarchy-activity-monitor-power-helper
-pkgver=1.3.0
+pkgver=2.0.0
 pkgrel=1
-pkgdesc="Optional root-only RAPL reader for the Omarchy Activity Monitor plugin"
-arch=('any')
+pkgdesc="Optional root-only native RAPL reader for the Omarchy Activity Monitor plugin"
+arch=('x86_64')
 url="https://github.com/stappmus/omarchy-activity-monitor"
 license=('MIT')
-depends=('bash' 'coreutils' 'sudo')
+depends=('gcc-libs' 'glibc' 'sudo')
+makedepends=('gcc' 'make')
 options=('!debug')
 source=(
-  'activity-stats'
+  'activity-sampler.cpp'
+  'Makefile'
   'stappmus-activity-monitor.sudoers'
   'README.md'
   'LICENSE'
 )
 sha256sums=(
-  'd1df0875a4553c6c9b4f1af943f75444f3f6b74003d3129f7ad2fb7b913f0742'
-  '0d65c92f6ebf96534d885ee4fc4c164dc3bfb0d54db088bbdc77c19ed7d263c8'
-  '702af495829bd8155fb869000272d08d0a442098098ef3db177c35ddd7df2ba4'
+  'd0d0d3125c00bdc5ee12bd51b8b95eea2890c156201cc1a33c82df5f42d700a4'
+  '2ea69385047c3a1d1893378e2866a464cba7ae28040c0add8a3eaa80f94700a3'
+  'e248f015e89bc7f3df4714e7d1e0248c4ac9cc4b4642dda6aa428741b6c4f2ca'
+  'edcaeffc9ba742b1ea7fb1f13fe94e45506ec11cd6a256f9b70f50b4bbb69681'
   'dd56ead2d3379b1d8298bbd1b905188b21894c46312ea4186b2afde9b03b3184'
 )
 
+build() {
+  make activity-sampler
+}
+
 check() {
-  bash -n activity-stats
+  [[ $(./activity-sampler --version) == 'activity-sampler 2.0.0' ]]
   grep -Fxq \
-    '%wheel ALL=(root) NOPASSWD: /usr/lib/stappmus-activity-monitor/activity-stats --activity-process-power-reader' \
+    '%wheel ALL=(root) NOPASSWD: /usr/lib/stappmus-activity-monitor/activity-sampler --activity-process-power-reader' \
     stappmus-activity-monitor.sudoers
   if command -v visudo >/dev/null 2>&1; then
     visudo -cf stappmus-activity-monitor.sudoers >/dev/null
@@ -33,8 +40,8 @@ check() {
 }
 
 package() {
-  install -Dm755 activity-stats \
-    "$pkgdir/usr/lib/stappmus-activity-monitor/activity-stats"
+  install -Dm755 activity-sampler \
+    "$pkgdir/usr/lib/stappmus-activity-monitor/activity-sampler"
   install -Dm440 stappmus-activity-monitor.sudoers \
     "$pkgdir/etc/sudoers.d/stappmus-activity-monitor"
   install -Dm644 README.md \

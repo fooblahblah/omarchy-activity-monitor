@@ -70,6 +70,19 @@ assertDeepEqual(withHistory.cpuHistory, [20, 0], 'activity caps history buffers'
 assertEqual(activity.counterPercent({ total: 100, idle: 20 }, { total: 50, idle: 10 }), 0, 'activity handles reset CPU counters')
 assertEqual(activity.counterRate(100, 50, 1), 0, 'activity handles reset byte counters')
 
+const baseline = activity.baselineMetrics(second, {
+  cpu: 42,
+  download: 100,
+  upload: 50,
+  diskRead: 25,
+  diskWrite: 10,
+  cpuHistory: [20, 42],
+  memoryHistory: [60, 65]
+})
+assertEqual(baseline.cpu, 42, 'activity retains the last CPU rate while taking a fresh baseline')
+assertEqual(baseline.memory, 65, 'activity immediately refreshes single-sample memory usage')
+assertDeepEqual(baseline.cpuHistory, [20, 42], 'activity does not add zeroes while taking a fresh baseline')
+
 const firstProcesses = activity.parseProcessSnapshot([
   'schema\tactivity-processes\t1',
   'sample\t100\t100',
@@ -169,15 +182,12 @@ grep -Eq '^sample[[:space:]][0-9]+([.][0-9]+)?[[:space:]][0-9]+[[:space:]][0-9]+
 grep -Eq '^process[[:space:]]' <<<"$process_snapshot" || fail "activity process collector emits process rows"
 pass "activity collector emits the process snapshot contract"
 
-process_reader_snapshot=$(
-  printf 'ignored\nsample\nsample\n' |
-    "$ROOT/activity-process-stats" --reader
-)
-[[ $(grep -c $'^schema\tactivity-processes\t1$' <<<"$process_reader_snapshot") -eq 2 ]] ||
-  fail "activity process reader does not emit a schema for every sample"
-[[ $(grep -c $'^snapshot-end\tprocesses$' <<<"$process_reader_snapshot") -eq 2 ]] ||
-  fail "activity process reader does not frame every requested sample"
-pass "activity process reader serves repeated snapshots from one process"
+[[ -x $ROOT/activity-sampler ]] || fail "native activity sampler is executable"
+[[ $("$ROOT/activity-sampler" --version) == "activity-sampler 2.0.0" ]] ||
+  fail "native activity sampler reports the release protocol version"
+[[ ! -e $ROOT/activity-process-stats ]] ||
+  fail "legacy process helper remains beside the unified native sampler"
+pass "activity ships one native sampler instead of a process-helper chain"
 
 reader_snapshot=$(
   printf 'resources\nprocesses\nprocesses\nthermals\ngpus\nstorage\n' |
@@ -190,14 +200,14 @@ grep -Fq $'snapshot-end\tresources' <<<"$reader_snapshot" ||
 grep -Fq $'snapshot-end\tprocesses' <<<"$reader_snapshot" ||
   fail "activity reader does not frame process snapshots"
 [[ $(grep -c $'^snapshot-end\tprocesses$' <<<"$reader_snapshot") -eq 2 ]] ||
-  fail "activity reader does not reuse its process helper"
+  fail "activity reader does not serve repeated process snapshots"
 grep -Fq $'snapshot-end\tthermals' <<<"$reader_snapshot" ||
   fail "activity reader does not frame thermal snapshots"
 grep -Fq $'snapshot-end\tgpus' <<<"$reader_snapshot" ||
   fail "activity reader does not frame GPU snapshots"
 grep -Fq $'snapshot-end\tstorage' <<<"$reader_snapshot" ||
   fail "activity reader does not frame storage snapshots"
-pass "activity reader reuses one process for independently requested snapshots"
+pass "activity reader serves independently requested snapshots in one native process"
 
 coproc SELF_READER { exec "$ROOT/activity-stats" --activity-reader; }
 self_reader_pid=$SELF_READER_PID
@@ -210,26 +220,20 @@ while IFS= read -r -u "$self_reader_output" line; do
   self_reader_snapshot+="$line"$'\n'
 done
 process_children=$(<"/proc/$self_reader_pid/task/$self_reader_pid/children")
-read -r process_helper_pid extra_children <<<"$process_children"
-[[ $process_helper_pid =~ ^[0-9]+$ && -z $extra_children ]] ||
-  fail "activity reader does not keep exactly one process helper"
-[[ -e /proc/$process_helper_pid ]] ||
-  fail "activity reader process helper exited after its first snapshot"
+[[ -z $process_children ]] ||
+  fail "native activity reader spawned a child collector"
 
 printf 'processes\n' >&"$self_reader_input"
 while IFS= read -r -u "$self_reader_output" line; do
   [[ $line == $'snapshot-end\tprocesses' ]] && break
 done
 process_children=$(<"/proc/$self_reader_pid/task/$self_reader_pid/children")
-read -r second_process_helper_pid extra_children <<<"$process_children"
-[[ $second_process_helper_pid == "$process_helper_pid" && -z $extra_children ]] ||
-  fail "activity reader restarted its process helper between snapshots"
+[[ -z $process_children ]] ||
+  fail "native activity reader spawned a child between process snapshots"
 
 exec {self_reader_input}>&-
 wait "$self_reader_pid"
-[[ ! -e /proc/$process_helper_pid ]] ||
-  fail "activity reader left its process helper running after input closed"
-pass "activity reader reuses and cleans up one lazy process helper"
+pass "activity reader keeps all unprivileged sampling in one native process"
 
 if grep -Fq $'process\t'"$self_reader_pid"$'\t' <<<"$self_reader_snapshot"; then
   fail "activity reader reports its own sampling process as workload"
@@ -238,42 +242,6 @@ pass "activity reader excludes its own sampling process"
 
 fixture_root=$(mktemp -d)
 trap 'rm -rf -- "$fixture_root"' EXIT
-
-recovery_dir="$fixture_root/recovery"
-mkdir -p "$recovery_dir"
-cp "$ROOT/activity-stats" "$recovery_dir/activity-stats"
-printf '%s\n' \
-  '#!/bin/bash' \
-  'set -euo pipefail' \
-  'count=0' \
-  '[[ ! -r $OMARCHY_TEST_READER_COUNT ]] || read -r count <"$OMARCHY_TEST_READER_COUNT"' \
-  '((count += 1))' \
-  'printf "%s\n" "$count" >"$OMARCHY_TEST_READER_COUNT"' \
-  '[[ ${1:-} == --reader && $# -eq 1 ]] || exit 64' \
-  '(( count > 1 )) || exit 70' \
-  'echo "process reader recovered" >&2' \
-  'while IFS= read -r request; do' \
-  '  [[ $request == sample ]] || continue' \
-  '  printf "schema\tactivity-processes\t1\nsample\t1\t100\t1\nsnapshot-end\tprocesses\n"' \
-  'done' \
-  >"$recovery_dir/activity-process-stats"
-chmod +x \
-  "$recovery_dir/activity-stats" \
-  "$recovery_dir/activity-process-stats"
-recovery_stderr="$fixture_root/recovery-stderr"
-recovery_snapshot=$(
-  OMARCHY_TEST_READER_COUNT="$fixture_root/recovery-count" \
-    "$recovery_dir/activity-stats" --activity-reader \
-    2>"$recovery_stderr" <<<"processes"
-)
-[[ $(<"$fixture_root/recovery-count") == 2 ]] ||
-  fail "activity reader did not restart a failed process helper"
-grep -Fq $'schema\tactivity-processes\t1' <<<"$recovery_snapshot" &&
-  grep -Fq $'snapshot-end\tprocesses' <<<"$recovery_snapshot" ||
-  fail "activity reader did not return the recovered process frame"
-grep -Fq 'process reader recovered' "$recovery_stderr" ||
-  fail "activity reader helper cleanup suppressed later diagnostics"
-pass "activity reader recovers once from a failed process helper"
 
 mkdir -p "$fixture_root/proc/101" "$fixture_root/proc/102" "$fixture_root/proc/103"
 printf '200.00 100.00\n' >"$fixture_root/proc/uptime"
@@ -294,7 +262,7 @@ fixture_process_snapshot=$(
     OMARCHY_SYSTEM_STATS_PAGE_SIZE=4096 \
     "$ROOT/activity-stats" --activity-processes
 )
-grep -Fq $'process\t101\talice\tR\t1000\t20\t120\tworker task' \
+grep -Fq $'process\t101\talice\tR\t1000\t20\t100\tworker task' \
   <<<"$fixture_process_snapshot" || fail "activity process collector reads a stable fixture process"
 [[ $(grep -c '^process' <<<"$fixture_process_snapshot") -eq 1 ]] ||
   fail "activity process collector did not skip a vanished fixture PID"
@@ -366,6 +334,8 @@ if grep -Eq '^[[:space:]]*Process[[:space:]]*[{]' "$panel_file"; then
 fi
 grep -Fq 'command: [root.statsHelperPath, "--activity-reader"]' "$controller_file" ||
   fail "activity panel does not reuse a single unprivileged stats reader"
+grep -Fq 'String(Qt.resolvedUrl("activity-sampler"))' "$controller_file" ||
+  fail "activity panel does not launch the native sampler directly"
 grep -Fq '? [powerHelperPath]' "$controller_file" ||
   fail "activity panel does not use the persistent guarded CPU-energy reader"
 grep -Fq 'if (!active || !expanded || processPowerUnavailable || _processPowerSamplePending) return' "$controller_file" ||
@@ -375,14 +345,19 @@ grep -Fq 'onExpandedChanged:' "$controller_file" &&
   fail "activity panel carries an energy baseline across collapsed time"
 grep -Fq 'root.markProcessPowerUnavailable()' "$controller_file" ||
   fail "activity panel does not clear stale watts after an energy read failure"
-grep -Fq 'root.refreshProcessCycle()' "$controller_file" ||
+grep -Fq 'refreshProcessCycle()' "$controller_file" ||
   fail "activity panel does not coordinate energy and process refreshes"
-grep -Fq 'onTriggered: root.refreshResources()' "$controller_file" &&
-  grep -Fq 'onTriggered: root.refreshProcessCycle()' "$controller_file" &&
-  grep -Fq 'onTriggered: root.refreshThermals()' "$controller_file" &&
-  grep -Fq 'onTriggered: root.refreshGpus()' "$controller_file" &&
-  grep -Fq 'onTriggered: root.refreshStorage()' "$controller_file" ||
-  fail "activity panel does not preserve each configured refresh cadence"
+grep -Fq 'id: deadlineScheduler' "$controller_file" &&
+  grep -Fq 'function collectDueSnapshots()' "$controller_file" &&
+  grep -Fq '_resourceDue = nextDeadline(_resourceDue, refreshInterval, now)' "$controller_file" &&
+  grep -Fq '_processDue = nextDeadline(_processDue, processRefreshInterval, now)' "$controller_file" &&
+  grep -Fq '_thermalDue = nextDeadline(_thermalDue, thermalRefreshInterval, now)' "$controller_file" &&
+  grep -Fq '_gpuDue = nextDeadline(_gpuDue, gpuRefreshInterval, now)' "$controller_file" &&
+  grep -Fq '_storageDue = nextDeadline(_storageDue, storageRefreshInterval, now)' "$controller_file" ||
+  fail "activity panel does not coalesce its independent deadlines"
+if grep -Fq 'repeat: true' "$controller_file"; then
+  fail "activity panel still wakes separate recurring timers"
+fi
 grep -Fq 'id: statsReaderWatchdog' "$controller_file" &&
   grep -Fq 'id: processPowerWatchdog' "$controller_file" ||
   fail "activity readers can remain stuck indefinitely"
@@ -395,10 +370,20 @@ fi
 if grep -Eq 'activity-package-power|refreshPackagePower|packagePowerProc' "$controller_file"; then
   fail "activity panel still polls package power"
 fi
-grep -Fq 'running: root.active && root.expanded' "$controller_file" &&
+grep -Fq 'if (expanded) sendStatsRequest("gpus")' "$controller_file" &&
+  grep -Fq '_gpuDue = 0' "$controller_file" &&
   grep -Fq 'resetGpuMeasurement()' "$controller_file" ||
   fail "activity panel samples GPU details while the advanced view is collapsed"
-pass "activity controller owns explicit reader states and independent refresh cadences"
+grep -Fq '_metrics = Model.baselineMetrics(next, metrics)' "$controller_file" &&
+  grep -Fq 'function resetSessionSampling()' "$controller_file" &&
+  grep -Fq 'if (_gpus.length === 0)' "$controller_file" ||
+  fail "activity panel does not retain valid display data while taking fresh baselines"
+if grep -Fq '    _snapshot = Model.emptySnapshot()' "$controller_file" ||
+   grep -Fq '    _processes = []' "$controller_file" ||
+   grep -Fq '    _gpus = []' "$controller_file"; then
+  fail "activity panel clears stale display data when a sampling session changes"
+fi
+pass "activity controller coalesces deadlines and refreshes retained values without blanking"
 
 grep -Fq 'text: "EST. W"' "$panel_file" ||
   fail "activity process table does not label estimated CPU watts"

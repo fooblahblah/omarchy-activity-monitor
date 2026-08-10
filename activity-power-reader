@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-readonly helper=/usr/lib/stappmus-activity-monitor/activity-stats
+readonly helper=/usr/lib/stappmus-activity-monitor/activity-sampler
 
 [[ $# -eq 0 ]] || exit 64
 [[ -x $helper ]] || exit 77
-exec sudo -n /usr/lib/stappmus-activity-monitor/activity-stats --activity-process-power-reader
+exec sudo -n /usr/lib/stappmus-activity-monitor/activity-sampler --activity-process-power-reader

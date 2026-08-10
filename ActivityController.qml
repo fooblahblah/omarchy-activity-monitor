@@ -17,7 +17,7 @@ Item {
   property bool expanded: false
 
   readonly property string statsHelperPath: decodeURIComponent(
-    String(Qt.resolvedUrl("activity-stats")).replace("file://", ""))
+    String(Qt.resolvedUrl("activity-sampler")).replace("file://", ""))
   readonly property string powerHelperPath: decodeURIComponent(
     String(Qt.resolvedUrl("activity-power-reader")).replace("file://", ""))
 
@@ -71,6 +71,12 @@ Item {
   property bool _gpuSamplePending: false
   property bool _storageSamplePending: false
 
+  property double _resourceDue: 0
+  property double _processDue: 0
+  property double _thermalDue: 0
+  property double _gpuDue: 0
+  property double _storageDue: 0
+
   property var _processPowerBuffer: []
   property bool _processPowerSamplePending: false
   property string _processPowerState: powerStateStopped
@@ -84,6 +90,58 @@ Item {
     var value = Number(setting(name, fallback))
     if (!isFinite(value)) value = fallback
     return Math.max(minimum, Math.min(maximum, value))
+  }
+
+  function nextDeadline(previous, interval, now) {
+    if (previous <= 0) return now + interval
+    if (previous > now) return previous
+    return previous + (Math.floor((now - previous) / interval) + 1) * interval
+  }
+
+  function scheduleNextDeadline() {
+    deadlineScheduler.stop()
+    if (!active) return
+
+    var next = Math.min(_resourceDue, _processDue, _thermalDue, _storageDue)
+    if (expanded && _gpuDue > 0) next = Math.min(next, _gpuDue)
+    deadlineScheduler.interval = Math.max(1, Math.round(next - Date.now()))
+    deadlineScheduler.start()
+  }
+
+  function resetPeriodicDeadlines() {
+    var now = Date.now()
+    _resourceDue = now + refreshInterval
+    _processDue = now + processRefreshInterval
+    _thermalDue = now + thermalRefreshInterval
+    _storageDue = now + storageRefreshInterval
+    _gpuDue = expanded ? now + gpuRefreshInterval : 0
+    scheduleNextDeadline()
+  }
+
+  function collectDueSnapshots() {
+    if (!active) return
+    var now = Date.now()
+    if (_resourceDue <= now + 1) {
+      refreshResources()
+      _resourceDue = nextDeadline(_resourceDue, refreshInterval, now)
+    }
+    if (_processDue <= now + 1) {
+      refreshProcessCycle()
+      _processDue = nextDeadline(_processDue, processRefreshInterval, now)
+    }
+    if (_thermalDue <= now + 1) {
+      refreshThermals()
+      _thermalDue = nextDeadline(_thermalDue, thermalRefreshInterval, now)
+    }
+    if (_storageDue <= now + 1) {
+      refreshStorage()
+      _storageDue = nextDeadline(_storageDue, storageRefreshInterval, now)
+    }
+    if (expanded && _gpuDue > 0 && _gpuDue <= now + 1) {
+      refreshGpus()
+      _gpuDue = nextDeadline(_gpuDue, gpuRefreshInterval, now)
+    }
+    scheduleNextDeadline()
   }
 
   function statsPending(kind) {
@@ -254,6 +312,13 @@ Item {
   function consumeSnapshot(raw) {
     var next = Model.parseSnapshot(raw)
     if (next.schema !== 1 || next.sample <= 0) return
+    if (_previousSnapshot.sample <= 0) {
+      _metrics = Model.baselineMetrics(next, metrics)
+      _previousSnapshot = next
+      _snapshot = next
+      if (active) resourceWarmup.restart()
+      return
+    }
     _metrics = Model.nextMetrics(_previousSnapshot, next, metrics, historySamples)
     _previousSnapshot = next
     _snapshot = next
@@ -275,6 +340,13 @@ Item {
     if (!expanded) return
     var next = Model.parseGpuSnapshot(raw)
     if (next.schema !== 1 || next.sample <= 0) return
+    if (_previousGpuSnapshot.sample <= 0) {
+      if (_gpus.length === 0) _gpus = Model.nextGpus(_previousGpuSnapshot, next)
+      _previousGpuSnapshot = next
+      _gpuSnapshot = next
+      if (active) gpuWarmup.restart()
+      return
+    }
     _gpus = Model.nextGpus(_previousGpuSnapshot, next)
     _previousGpuSnapshot = next
     _gpuSnapshot = next
@@ -288,8 +360,10 @@ Item {
       return
     }
 
+    var needsWarmup = _previousProcessPowerSnapshot.sample <= 0
     _processPower = Model.nextPackagePower(_previousProcessPowerSnapshot, next)
     _previousProcessPowerSnapshot = next
+    if (needsWarmup && active) powerWarmup.restart()
     refreshProcesses()
   }
 
@@ -310,7 +384,6 @@ Item {
     if (next.schema !== 1 || next.sample <= 0) return
     if (_previousProcessSnapshot.sample <= 0) {
       _previousProcessSnapshot = next
-      _processes = []
       if (active) processWarmup.restart()
       return
     }
@@ -336,9 +409,7 @@ Item {
   }
 
   function resetGpuMeasurement() {
-    _gpuSnapshot = Model.emptyGpuSnapshot()
     _previousGpuSnapshot = Model.emptyGpuSnapshot()
-    _gpus = []
   }
 
   function markProcessPowerUnavailable() {
@@ -346,21 +417,12 @@ Item {
     resetProcessPowerMeasurement()
   }
 
-  function resetSessionData() {
-    _snapshot = Model.emptySnapshot()
-    _thermalSnapshot = Model.emptyThermalSnapshot()
-    _storageSnapshot = Model.emptyStorageSnapshot()
-    _gpuSnapshot = Model.emptyGpuSnapshot()
-    _gpus = []
-    _processPower = Model.emptyPower()
-    _processes = []
-    _metrics = Model.emptyMetrics()
-    _processMetricsReady = false
-
+  function resetSessionSampling() {
     _previousSnapshot = Model.emptySnapshot()
     _previousProcessSnapshot = Model.emptyProcessSnapshot()
     _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
     _previousGpuSnapshot = Model.emptyGpuSnapshot()
+    resetProcessPowerMeasurement()
     resetStatsReaderState()
     _processPowerBuffer = []
     _processPowerSamplePending = false
@@ -368,15 +430,21 @@ Item {
   }
 
   function startSession() {
-    resetSessionData()
+    resetSessionSampling()
     refresh()
+    resetPeriodicDeadlines()
   }
 
   function stopSession() {
+    deadlineScheduler.stop()
     resetStatsReaderState()
     if (statsReaderProc.running) statsReaderProc.running = false
     stopProcessPowerReader()
+    resourceWarmup.stop()
     processWarmup.stop()
+    gpuWarmup.stop()
+    powerWarmup.stop()
+    statsReaderRetry.stop()
   }
 
   onActiveChanged: {
@@ -389,11 +457,23 @@ Item {
       stopProcessPowerReader()
       resetProcessPowerMeasurement()
       resetGpuMeasurement()
+      _gpuDue = 0
+      scheduleNextDeadline()
     } else if (active) {
+      _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
+      _previousGpuSnapshot = Model.emptyGpuSnapshot()
       refreshProcessCycle()
       refreshGpus()
+      _gpuDue = Date.now() + gpuRefreshInterval
+      scheduleNextDeadline()
     }
   }
+
+  onRefreshIntervalChanged: if (active) resetPeriodicDeadlines()
+  onProcessRefreshIntervalChanged: if (active) resetPeriodicDeadlines()
+  onThermalRefreshIntervalChanged: if (active) resetPeriodicDeadlines()
+  onGpuRefreshIntervalChanged: if (active) resetPeriodicDeadlines()
+  onStorageRefreshIntervalChanged: if (active) resetPeriodicDeadlines()
 
   Process {
     id: statsReaderProc
@@ -406,7 +486,10 @@ Item {
       root._statsReaderReady = true
       root.sendPendingStatsRequests()
     }
-    onExited: root.resetStatsReaderState()
+    onExited: {
+      root.resetStatsReaderState()
+      if (root.active) statsReaderRetry.restart()
+    }
   }
 
   Process {
@@ -436,8 +519,13 @@ Item {
       root._processPowerBuffer = []
       processPowerWatchdog.stop()
 
-      if (!root.active || !root.expanded || exitedState === root.powerStateStopped) {
+      if (!root.active || !root.expanded) {
         root._processPowerState = root.powerStateStopped
+        return
+      }
+      if (exitedState === root.powerStateStopped) {
+        root._processPowerState = root.powerStateStopped
+        Qt.callLater(function() { root.requestProcessPowerSample() })
         return
       }
       if (exitedState === root.powerStateUnavailable) return
@@ -456,10 +544,38 @@ Item {
   }
 
   Timer {
+    id: statsReaderRetry
+    interval: 250
+    repeat: false
+    onTriggered: if (root.active) root.refresh()
+  }
+
+  Timer {
+    id: resourceWarmup
+    interval: 300
+    repeat: false
+    onTriggered: if (root.active) root.refreshResources()
+  }
+
+  Timer {
     id: processWarmup
-    interval: 600
+    interval: 300
     repeat: false
     onTriggered: if (root.active) root.refreshProcesses()
+  }
+
+  Timer {
+    id: gpuWarmup
+    interval: 300
+    repeat: false
+    onTriggered: if (root.active && root.expanded) root.refreshGpus()
+  }
+
+  Timer {
+    id: powerWarmup
+    interval: 300
+    repeat: false
+    onTriggered: if (root.active && root.expanded) root.requestProcessPowerSample()
   }
 
   Timer {
@@ -480,37 +596,8 @@ Item {
   }
 
   Timer {
-    interval: root.refreshInterval
-    running: root.active
-    repeat: true
-    onTriggered: root.refreshResources()
-  }
-
-  Timer {
-    interval: root.processRefreshInterval
-    running: root.active
-    repeat: true
-    onTriggered: root.refreshProcessCycle()
-  }
-
-  Timer {
-    interval: root.thermalRefreshInterval
-    running: root.active
-    repeat: true
-    onTriggered: root.refreshThermals()
-  }
-
-  Timer {
-    interval: root.gpuRefreshInterval
-    running: root.active && root.expanded
-    repeat: true
-    onTriggered: root.refreshGpus()
-  }
-
-  Timer {
-    interval: root.storageRefreshInterval
-    running: root.active
-    repeat: true
-    onTriggered: root.refreshStorage()
+    id: deadlineScheduler
+    repeat: false
+    onTriggered: root.collectDueSnapshots()
   }
 }

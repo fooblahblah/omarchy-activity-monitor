@@ -614,6 +614,30 @@ function aggregateDisks(disks) {
   }
 }
 
+// A counter-based metric needs two samples. While the fresh baseline is being
+// established, retain the last derived rates so reopening the panel does not
+// flash zero, but immediately refresh values that are valid from one sample.
+function baselineMetrics(current, existing) {
+  var old = existing || emptyMetrics()
+  var network = selectNetwork(null, current, old.networkInterface || "")
+  var oldCores = Array.isArray(old.cores) ? old.cores : []
+  return {
+    cpu: number(old.cpu),
+    memory: memoryPercent(current && current.memory),
+    swap: swapPercent(current && current.memory),
+    download: number(old.download),
+    upload: number(old.upload),
+    diskRead: number(old.diskRead),
+    diskWrite: number(old.diskWrite),
+    networkInterface: network ? network.name : String(old.networkInterface || ""),
+    cores: oldCores.length > 0 ? oldCores : coreUsage(null, current),
+    cpuHistory: Array.isArray(old.cpuHistory) ? old.cpuHistory.slice() : [],
+    memoryHistory: Array.isArray(old.memoryHistory) ? old.memoryHistory.slice() : [],
+    networkHistory: Array.isArray(old.networkHistory) ? old.networkHistory.slice() : [],
+    diskHistory: Array.isArray(old.diskHistory) ? old.diskHistory.slice() : []
+  }
+}
+
 function nextMetrics(previous, current, existing, historyLimit) {
   var old = existing || {}
   var seconds = previous && previous.sample > 0 && current.sample > previous.sample
@@ -877,6 +901,7 @@ if (typeof module !== "undefined") {
     coreUsage: coreUsage,
     selectNetwork: selectNetwork,
     aggregateDisks: aggregateDisks,
+    baselineMetrics: baselineMetrics,
     nextMetrics: nextMetrics,
     nextProcesses: nextProcesses,
     processSystemBusyDelta: processSystemBusyDelta,
