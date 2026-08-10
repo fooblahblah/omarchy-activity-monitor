@@ -187,9 +187,9 @@ Panel {
   }
 
   function gpuMemoryLabel(gpu) {
-    if (gpu && gpu.memoryKind === "shared") return "SHARED GPU MEM"
+    if (gpu && gpu.memoryKind === "shared") return "SHARED"
     if (gpu && gpu.memoryKind === "vram") return "VRAM"
-    return "GPU MEMORY"
+    return "MEMORY"
   }
 
   function gpuMemoryText(gpu) {

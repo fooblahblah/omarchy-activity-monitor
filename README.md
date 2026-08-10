@@ -34,7 +34,7 @@ extra amount to add to used memory.
 
 The `GPU` square lists up to two adapters separately. NVIDIA and discrete AMD
 cards show used/total VRAM when their drivers expose it. Integrated GPUs show
-`SHARED GPU MEM`: the reported system-memory allocation currently resident for
+`SHARED`: the reported system-memory allocation currently resident for
 readable desktop GPU clients. Shared GPU memory is part of RAM and grows
 dynamically, so the panel deliberately shows the amount in use without
 inventing a fixed GPU memory total. Intel/Xe and compatible drivers use

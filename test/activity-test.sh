@@ -334,7 +334,7 @@ grep -Fq 'text: "DISK STORAGE"' "$panel_file" ||
   fail "activity expanded details do not show disk storage"
 grep -Fq 'text: root.gpus.length > 1 ? "GPU · "' "$panel_file" ||
   fail "activity expanded details do not show GPU adapters"
-grep -Fq 'return "SHARED GPU MEM"' "$panel_file" ||
+grep -Fq 'return "SHARED"' "$panel_file" ||
   fail "activity panel does not distinguish integrated shared GPU memory"
 grep -Fq 'return "VRAM"' "$panel_file" ||
   fail "activity panel does not label dedicated GPU memory"
