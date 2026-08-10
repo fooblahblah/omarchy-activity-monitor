@@ -391,6 +391,10 @@ grep -Fq 'model: root.sortedProcesses' "$panel_file" ||
   fail "activity process table silently caps the virtualized process list"
 grep -Fq 'Model.formatBytes(root.snapshot.memory.cached)' "$panel_file" ||
   fail "activity panel does not expose reclaimable memory cache"
+[[ $(grep -Fc 'label: "MEMORY USED"' "$panel_file") -eq 2 ]] ||
+  fail "activity panel does not distinguish used memory from cache"
+grep -Fq 'label: "CORES"' "$panel_file" ||
+  fail "activity system details lose the logical core count"
 if grep -Fq 'text: "POWER"' "$panel_file"; then
   fail "activity presents estimated per-process power as an exact measurement"
 fi

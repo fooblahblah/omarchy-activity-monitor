@@ -400,7 +400,7 @@ Panel {
 
         MetricCard {
           width: (parent.width - parent.spacing) / 2
-          label: "MEMORY"
+          label: "MEMORY USED"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.snapshot.memory.total
             ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
@@ -513,9 +513,11 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "MEMORY"
+          label: "MEMORY USED"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
-          detail: root.snapshot.memory.total ? Model.formatBytes(root.snapshot.memory.total) + " TOTAL" : "TOTAL"
+          detail: root.snapshot.memory.total
+            ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
+            : "TOTAL"
           history: root.metrics.memoryHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.memory)
@@ -616,12 +618,6 @@ Panel {
                 Repeater {
                   model: [
                     {
-                      label: "RAM",
-                      value: root.snapshot.memory.total
-                        ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available)
-                        : "—"
-                    },
-                    {
                       label: "CACHE",
                       value: root.snapshot.memory.total
                         ? Model.formatBytes(root.snapshot.memory.cached)
@@ -630,6 +626,10 @@ Panel {
                     {
                       label: "SWAP",
                       value: root.snapshot.memory.swapTotal ? root.percentText(root.metrics.swap) : "NONE"
+                    },
+                    {
+                      label: "CORES",
+                      value: root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL" : "—"
                     },
                     {
                       label: "TASKS",
