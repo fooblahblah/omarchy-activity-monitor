@@ -400,7 +400,7 @@ Panel {
 
         MetricCard {
           width: (parent.width - parent.spacing) / 2
-          label: "MEMORY USED"
+          label: "USED MEMORY"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.snapshot.memory.total
             ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
@@ -513,7 +513,7 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "MEMORY USED"
+          label: "USED MEMORY"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.snapshot.memory.total
             ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
@@ -618,7 +618,7 @@ Panel {
                 Repeater {
                   model: [
                     {
-                      label: "CACHE",
+                      label: "RECLAIMABLE CACHE",
                       value: root.snapshot.memory.total
                         ? Model.formatBytes(root.snapshot.memory.cached)
                         : "—"
@@ -644,6 +644,16 @@ Panel {
                     value: modelData.value
                   }
                 }
+              }
+
+              Text {
+                width: parent.width
+                text: "CACHE CAN BE REUSED AUTOMATICALLY"
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
               }
             }
           }

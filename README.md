@@ -25,10 +25,11 @@ memory, reclaimable cache and swap details, disk storage used and remaining,
 search, process sorting, estimated CPU-package watts, and a larger process list.
 Your own apps can be asked to close from the expanded view after a confirmation.
 
-The `MEMORY USED` percentage follows Linux's available-memory accounting:
-`(MemTotal - MemAvailable) / MemTotal`. The expanded `CACHE` value is
-`Cached + SReclaimable`, matching `free`'s cache column. These figures overlap
-because `MemAvailable` estimates cache that can be reclaimed.
+The `USED MEMORY` percentage follows Linux's available-memory accounting:
+`(MemTotal - MemAvailable) / MemTotal`. The expanded `RECLAIMABLE CACHE` value
+is `Cached + SReclaimable`, matching `free`'s cache column. Linux can reuse
+that cache automatically when applications need RAM, so it is not an extra
+amount to add to used memory.
 
 The expanded CPU card shows the measured total CPU-package watts. Individual
 process rows show their estimated share of that total.
