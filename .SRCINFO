@@ -1,6 +1,6 @@
 pkgbase = omarchy-activity-monitor-power-helper
 	pkgdesc = Optional root-only RAPL reader for the Omarchy Activity Monitor plugin
-	pkgver = 1.1.2
+	pkgver = 1.1.3
 	pkgrel = 1
 	url = https://github.com/stappmus/omarchy-activity-monitor
 	arch = any
@@ -15,7 +15,7 @@ pkgbase = omarchy-activity-monitor-power-helper
 	source = LICENSE
 	sha256sums = df140c15d2c35f7aa0fa6b01fe893b66505e11be32af9075c2267a7c303b2957
 	sha256sums = 0d65c92f6ebf96534d885ee4fc4c164dc3bfb0d54db088bbdc77c19ed7d263c8
-	sha256sums = 66a1ccb722e18ba8a9590f5c15cb7f1375a286a3ab89915d3b7173b1a30ede9d
+	sha256sums = 5eb2723ce6c3cdd405847894b26b8a135e83f2851dda6dfbf9c58eae08515c03
 	sha256sums = dd56ead2d3379b1d8298bbd1b905188b21894c46312ea4186b2afde9b03b3184
 
 pkgname = omarchy-activity-monitor-power-helper

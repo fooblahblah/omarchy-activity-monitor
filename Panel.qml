@@ -156,6 +156,12 @@ Panel {
     return Math.round(Number(value) || 0) + "%"
   }
 
+  function memoryBreakdownText() {
+    if (!snapshot.memory.total) return "USED — · CACHE —"
+    return "USED " + Model.formatBytes(snapshot.memory.total - snapshot.memory.available)
+      + " · CACHE " + Model.formatBytes(snapshot.memory.cached)
+  }
+
   function pressureColor(value) {
     return Number(value) >= 90 ? urgent : accent
   }
@@ -400,11 +406,9 @@ Panel {
 
         MetricCard {
           width: (parent.width - parent.spacing) / 2
-          label: "USED MEMORY"
+          label: "RAM USAGE"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
-          detail: root.snapshot.memory.total
-            ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
-            : "TOTAL"
+          detail: root.memoryBreakdownText()
           history: root.metrics.memoryHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.memory)
@@ -513,11 +517,9 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "USED MEMORY"
+          label: "RAM USAGE"
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
-          detail: root.snapshot.memory.total
-            ? Model.formatBytes(root.snapshot.memory.total - root.snapshot.memory.available) + " USED"
-            : "TOTAL"
+          detail: root.memoryBreakdownText()
           history: root.metrics.memoryHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.memory)
@@ -618,9 +620,9 @@ Panel {
                 Repeater {
                   model: [
                     {
-                      label: "RECLAIMABLE CACHE",
+                      label: "RAM TOTAL",
                       value: root.snapshot.memory.total
-                        ? Model.formatBytes(root.snapshot.memory.cached)
+                        ? Model.formatBytes(root.snapshot.memory.total)
                         : "—"
                     },
                     {
@@ -646,15 +648,6 @@ Panel {
                 }
               }
 
-              Text {
-                width: parent.width
-                text: "CACHE CAN BE REUSED AUTOMATICALLY"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
             }
           }
 

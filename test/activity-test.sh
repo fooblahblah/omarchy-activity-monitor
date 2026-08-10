@@ -389,13 +389,15 @@ grep -Fq 'showProcessUserColumn' "$panel_file" &&
   fail "activity process table does not adapt its optional columns on narrow screens"
 grep -Fq 'model: root.sortedProcesses' "$panel_file" ||
   fail "activity process table silently caps the virtualized process list"
-grep -Fq 'Model.formatBytes(root.snapshot.memory.cached)' "$panel_file" ||
+grep -Fq 'Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
   fail "activity panel does not expose reclaimable memory cache"
-[[ $(grep -Fc 'label: "USED MEMORY"' "$panel_file") -eq 2 ]] ||
+[[ $(grep -Fc 'label: "RAM USAGE"' "$panel_file") -eq 2 ]] ||
   fail "activity panel does not distinguish used memory from cache"
-grep -Fq 'label: "RECLAIMABLE CACHE"' "$panel_file" &&
-  grep -Fq 'text: "CACHE CAN BE REUSED AUTOMATICALLY"' "$panel_file" ||
-  fail "activity panel does not explain its cache reading"
+grep -Fq 'function memoryBreakdownText()' "$panel_file" &&
+  grep -Fq '" · CACHE " + Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
+  fail "activity RAM card does not show used memory and cache together"
+grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
+  fail "activity system details do not retain total RAM"
 grep -Fq 'label: "CORES"' "$panel_file" ||
   fail "activity system details lose the logical core count"
 if grep -Fq 'text: "POWER"' "$panel_file"; then
