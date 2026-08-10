@@ -11,6 +11,8 @@ function emptySnapshot() {
   return {
     schema: 0,
     sample: 0,
+    cpuFrequencyMHz: -1,
+    memorySpeedMTs: -1,
     cpu: { total: 0, idle: 0 },
     cores: [],
     memory: {
@@ -108,6 +110,7 @@ function gpuSnapshotEntry(snapshot, id) {
     vendor: "GPU",
     driver: "unknown",
     name: "GPU",
+    frequencyMHz: -1,
     directUtilization: -1,
     memoryUsed: -1,
     memoryTotal: -1,
@@ -159,6 +162,11 @@ function parseSnapshot(raw) {
         total: counters.total,
         idle: counters.idle
       })
+    } else if (kind === "frequency") {
+      if (fields[1] === "cpu")
+        snapshot.cpuFrequencyMHz = Math.max(-1, number(fields[2], -1))
+      else if (fields[1] === "memory")
+        snapshot.memorySpeedMTs = Math.max(-1, number(fields[2], -1))
     } else if (kind === "memory") {
       snapshot.memory = {
         total: number(fields[1]) * 1024,
@@ -310,6 +318,7 @@ function parseGpuSnapshot(raw) {
       gpu.vendor = String(fields[2] || "GPU")
       gpu.driver = String(fields[3] || "unknown")
       gpu.name = String(fields[4] || gpu.vendor + " GPU")
+      gpu.frequencyMHz = Math.max(-1, number(fields[9], -1))
       gpu.directUtilization = Math.max(-1, number(fields[5], -1))
       gpu.memoryUsed = Math.max(-1, number(fields[6], -1))
       gpu.memoryTotal = Math.max(-1, number(fields[7], -1))
@@ -413,6 +422,7 @@ function nextGpus(previous, current) {
       vendor: gpu.vendor,
       driver: gpu.driver,
       name: gpu.name,
+      frequencyMHz: gpu.frequencyMHz,
       usage: usage < 0 ? -1 : clamp(usage, 0, 100),
       memoryUsed: gpu.memoryUsed,
       memoryTotal: gpu.memoryTotal,

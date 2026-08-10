@@ -20,11 +20,17 @@ omarchy plugin disable stappmus.activity-monitor
 ```
 
 The compact panel shows CPU, memory, network and disk activity plus the three
-busiest processes. Expand it with the button or `e` for per-core activity,
-memory, reclaimable cache and swap details, disk storage used and remaining,
-GPU utilization and memory, search, process sorting, estimated CPU-package
-watts, and a larger process list. Your own apps can be asked to close from the
-expanded view after a confirmation.
+busiest processes. CPU and RAM card headings include the current average CPU
+clock and configured DDR transfer rate. Expand it with the button or `e` for
+per-core activity, memory, reclaimable cache and swap details, disk storage
+used and remaining, GPU utilization, graphics clock and memory, search,
+process sorting, estimated CPU-package watts, and a larger process list. Your
+own apps can be asked to close from the expanded view after a confirmation.
+
+CPU and GPU clocks are shown in MHz. DDR memory is shown in MT/s because DDR
+transfers data twice per clock cycle; its marketed speed is a transfer rate,
+not a clock frequency. Measurements that the kernel or firmware does not
+expose are omitted instead of estimated.
 
 The `RAM USAGE` card shows used memory and cache together. Used memory follows
 Linux's available-memory accounting: `(MemTotal - MemAvailable) / MemTotal`.

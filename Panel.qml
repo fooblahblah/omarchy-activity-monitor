@@ -171,6 +171,22 @@ Panel {
     return "USED " + usedText + " · CACHE " + cacheText
   }
 
+  function frequencyText(value, unit) {
+    var frequency = Number(value)
+    if (!isFinite(frequency) || frequency < 0) return ""
+    return Math.round(frequency) + " " + unit
+  }
+
+  function cpuCardLabel() {
+    var frequency = frequencyText(snapshot.cpuFrequencyMHz, "MHz")
+    return frequency ? "CPU · " + frequency : "CPU"
+  }
+
+  function memoryCardLabel() {
+    var speed = frequencyText(snapshot.memorySpeedMTs, "MT/s")
+    return speed ? "RAM · " + speed : "RAM USAGE"
+  }
+
   function compactGpuName(gpu) {
     var name = String(gpu && gpu.name || "GPU")
     name = name.replace(/^Intel Corporation[ ]*/i, "")
@@ -189,12 +205,19 @@ Panel {
     var bracketed = name.match(/\[([^\]]+)\]/g)
     if (bracketed && bracketed.length > 0)
       name = bracketed[bracketed.length - 1].slice(1, -1)
-    return "GPU · " + name.toUpperCase()
+    var frequency = frequencyText(adapters[0].frequencyMHz, "MHz")
+    return "GPU · " + name.toUpperCase() + (frequency ? " · " + frequency : "")
   }
 
   function gpuUsageText(gpu) {
     var usage = Number(gpu && gpu.usage)
     return isFinite(usage) && usage >= 0 ? Math.round(usage) + "%" : "SAMPLING"
+  }
+
+  function gpuUsageAndClockText(gpu) {
+    var usage = gpuUsageText(gpu)
+    var frequency = frequencyText(gpu && gpu.frequencyMHz, "MHz")
+    return frequency ? usage + " · " + frequency : usage
   }
 
   function gpuMemoryLabel(gpu) {
@@ -233,7 +256,7 @@ Panel {
         var gpu = adapters[i]
         items.push({
           label: String(gpu.vendor || "GPU").toUpperCase(),
-          value: gpuUsageText(gpu)
+          value: gpuUsageAndClockText(gpu)
         })
         items.push({ label: gpuMemoryLabel(gpu), value: gpuMemoryText(gpu) })
       }
@@ -497,7 +520,7 @@ Panel {
 
         MetricCard {
           width: (parent.width - parent.spacing) / 2
-          label: "CPU"
+          label: root.cpuCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.cpu) : "—"
           detail: root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL CPUS" : "CPU TOTAL"
           history: root.metrics.cpuHistory
@@ -507,7 +530,7 @@ Panel {
 
         MetricCard {
           width: (parent.width - parent.spacing) / 2
-          label: "RAM USAGE"
+          label: root.memoryCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.memoryBreakdownText()
           history: root.metrics.memoryHistory
@@ -605,7 +628,7 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "CPU"
+          label: root.cpuCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.cpu) : "—"
           detail: root.processPower.available
             ? root.measuredPackagePowerText(root.processPower.watts) + " PACKAGE · "
@@ -618,7 +641,7 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "RAM USAGE"
+          label: root.memoryCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.memoryBreakdownText()
           history: root.metrics.memoryHistory

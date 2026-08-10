@@ -154,6 +154,7 @@ activity_storage_stats() {
 
 declare -A activity_gpu_name_cache=()
 activity_gpu_name_result=""
+activity_gpu_frequency_result="-1"
 
 activity_trim_field() {
   local value="$1"
@@ -203,18 +204,83 @@ activity_gpu_name() {
   activity_gpu_name_result="$name"
 }
 
+activity_gpu_max_frequency_paths() {
+  local divisor="$1"
+  shift
+  local path value mhz
+  local best="-1"
+
+  for path in "$@"; do
+    [[ -r $path ]] || continue
+    read -r value <"$path" 2>/dev/null || continue
+    value=$(activity_trim_field "$value")
+    [[ $value =~ ^[0-9]+$ ]] || continue
+    mhz=$((value / divisor))
+    (( mhz > best )) && best="$mhz"
+  done
+
+  activity_gpu_frequency_result="$best"
+}
+
+activity_gpu_frequency() {
+  local card="$1"
+  local device_path="$2"
+  local vendor_hex="$3"
+  local line
+
+  activity_gpu_frequency_result="-1"
+  case "$vendor_hex" in
+    8086)
+      # Xe exposes the measured clock per GT. Older i915 generations expose
+      # the same value through their RPS or card-level frequency files.
+      activity_gpu_max_frequency_paths 1 \
+        "$device_path"/tile*/gt*/freq*/act_freq \
+        "$card"/gt/gt*/rps_act_freq_mhz \
+        "$card"/gt_act_freq_mhz
+      if (( activity_gpu_frequency_result < 0 )); then
+        activity_gpu_max_frequency_paths 1 \
+          "$device_path"/tile*/gt*/freq*/cur_freq \
+          "$card"/gt/gt*/rps_cur_freq_mhz \
+          "$card"/gt_cur_freq_mhz
+      fi
+      ;;
+    1002)
+      # amdgpu's first hwmon frequency is the graphics clock in Hz.
+      activity_gpu_max_frequency_paths 1000000 \
+        "$device_path"/hwmon/hwmon*/freq1_input
+      if (( activity_gpu_frequency_result < 0 )) && [[ -r $device_path/pp_dpm_sclk ]]; then
+        while IFS= read -r line; do
+          if [[ $line == *"*"* &&
+                $line =~ ([0-9]+)([.][0-9]+)?[[:space:]]*[Mm][Hh][Zz] ]]; then
+            activity_gpu_frequency_result="${BASH_REMATCH[1]}"
+            break
+          fi
+        done <"$device_path/pp_dpm_sclk"
+      fi
+      ;;
+  esac
+
+  # devfreq and hwmon cover additional DRM drivers without vendor-specific
+  # handling. Values are reported in Hz.
+  if (( activity_gpu_frequency_result < 0 )); then
+    activity_gpu_max_frequency_paths 1000000 \
+      "$device_path"/devfreq/*/cur_freq \
+      "$device_path"/hwmon/hwmon*/freq1_input
+  fi
+}
+
 activity_gpu_stats() {
   local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
   local sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
   local sample="0"
   local card card_name device_path device_real id vendor_hex vendor_name
   local driver_path driver name value used total kind
-  local has_nvidia=0 nvidia_output bus utilization used_mib total_mib
+  local has_nvidia=0 nvidia_output bus utilization used_mib total_mib clock_mhz
   local known_ids fdinfo
   local -a gpu_order=() fdinfo_files=()
   local -A gpu_seen=() gpu_vendor=() gpu_driver=() gpu_name=()
   local -A gpu_utilization=() gpu_memory_used=() gpu_memory_total=()
-  local -A gpu_memory_kind=()
+  local -A gpu_memory_kind=() gpu_frequency=()
 
   [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
   printf 'schema\tactivity-gpus\t1\n'
@@ -260,6 +326,8 @@ activity_gpu_stats() {
     gpu_memory_used["$id"]="-1"
     gpu_memory_total["$id"]="-1"
     gpu_memory_kind["$id"]="unknown"
+    activity_gpu_frequency "$card" "$device_path" "$vendor_hex"
+    gpu_frequency["$id"]="$activity_gpu_frequency_result"
     [[ $vendor_hex == "10de" ]] && has_nvidia=1
 
     value=""
@@ -309,20 +377,21 @@ activity_gpu_stats() {
   if (( has_nvidia )) && command -v nvidia-smi >/dev/null 2>&1; then
     if command -v timeout >/dev/null 2>&1; then
       nvidia_output=$(timeout 3 nvidia-smi \
-        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total \
+        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total,clocks.current.graphics \
         --format=csv,noheader,nounits 2>/dev/null) || nvidia_output=""
     else
       nvidia_output=$(nvidia-smi \
-        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total \
+        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total,clocks.current.graphics \
         --format=csv,noheader,nounits 2>/dev/null) || nvidia_output=""
     fi
 
-    while IFS=',' read -r bus name utilization used_mib total_mib; do
+    while IFS=',' read -r bus name utilization used_mib total_mib clock_mhz; do
       bus=$(activity_trim_field "$bus")
       name=$(activity_trim_field "$name")
       utilization=$(activity_trim_field "$utilization")
       used_mib=$(activity_trim_field "$used_mib")
       total_mib=$(activity_trim_field "$total_mib")
+      clock_mhz=$(activity_trim_field "$clock_mhz")
       bus="${bus,,}"
       if [[ $bus =~ ^[[:xdigit:]]{8}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[[:xdigit:]]$ ]]; then
         bus="${bus:4}"
@@ -345,15 +414,18 @@ activity_gpu_stats() {
         gpu_memory_total["$bus"]=$((total_mib * 1024 * 1024))
         gpu_memory_kind["$bus"]="vram"
       fi
+      if [[ $clock_mhz =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        gpu_frequency["$bus"]="$clock_mhz"
+      fi
     done <<<"$nvidia_output"
   fi
 
   for id in "${gpu_order[@]}"; do
-    printf 'gpu\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'gpu\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$id" "${gpu_vendor[$id]:-GPU}" "${gpu_driver[$id]:-unknown}" \
       "${gpu_name[$id]:-GPU}" "${gpu_utilization[$id]:--1}" \
       "${gpu_memory_used[$id]:--1}" "${gpu_memory_total[$id]:--1}" \
-      "${gpu_memory_kind[$id]:-unknown}"
+      "${gpu_memory_kind[$id]:-unknown}" "${gpu_frequency[$id]:--1}"
   done
 
   (( ${#gpu_order[@]} > 0 )) || return 0
@@ -520,27 +592,103 @@ activity_process_power_stats() {
   done
 }
 
+activity_memory_speed_checked=0
+activity_memory_speed_result="-1"
+
+activity_memory_gt_to_mt() {
+  local raw="$1"
+  local whole fraction
+  activity_memory_gt_to_mt_result="0"
+  [[ $raw =~ ^([0-9]+)([.]([0-9]+))?$ ]] || return 0
+  whole="${BASH_REMATCH[1]}"
+  fraction="${BASH_REMATCH[3]:-}000"
+  fraction="${fraction}000"
+  fraction="${fraction:0:3}"
+  activity_memory_gt_to_mt_result=$((10#$whole * 1000 + 10#$fraction))
+}
+
+activity_memory_speed_rows() {
+  local line key value candidate
+  local configured_mts=0 rated_mts=0
+
+  if (( !activity_memory_speed_checked )); then
+    activity_memory_speed_checked=1
+    if command -v udevadm >/dev/null 2>&1; then
+      while IFS= read -r line; do
+        [[ $line == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        candidate=0
+        case "$key" in
+          MEMORY_DEVICE_*_CONFIGURED_SPEED_MTS)
+            [[ $value =~ ^[0-9]+$ ]] && candidate="$value"
+            (( candidate > 0 && (configured_mts == 0 || candidate < configured_mts) )) &&
+              configured_mts="$candidate"
+            ;;
+          MEMORY_DEVICE_*_CONFIGURED_SPEED_GTS)
+            activity_memory_gt_to_mt "$value"
+            candidate="$activity_memory_gt_to_mt_result"
+            (( candidate > 0 && (configured_mts == 0 || candidate < configured_mts) )) &&
+              configured_mts="$candidate"
+            ;;
+          MEMORY_DEVICE_*_SPEED_MTS)
+            [[ $value =~ ^[0-9]+$ ]] && candidate="$value"
+            (( candidate > 0 && (rated_mts == 0 || candidate < rated_mts) )) &&
+              rated_mts="$candidate"
+            ;;
+          MEMORY_DEVICE_*_SPEED_GTS)
+            activity_memory_gt_to_mt "$value"
+            candidate="$activity_memory_gt_to_mt_result"
+            (( candidate > 0 && (rated_mts == 0 || candidate < rated_mts) )) &&
+              rated_mts="$candidate"
+            ;;
+        esac
+      done < <(
+        udevadm info --query=property --path=/devices/virtual/dmi/id 2>/dev/null
+      )
+    fi
+    if (( configured_mts > 0 )); then
+      activity_memory_speed_result="$configured_mts"
+    elif (( rated_mts > 0 )); then
+      activity_memory_speed_result="$rated_mts"
+    fi
+  fi
+
+  if (( activity_memory_speed_result > 0 )); then
+    printf 'frequency\tmemory\t%s\tMT/s\n' "$activity_memory_speed_result"
+  fi
+}
+
 activity_stats() {
   local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
   local sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
   local sample="0"
-  local block_stat
+  local block_stat cpu_frequency_stat
   local -a block_stats=()
+  local -a cpu_frequency_stats=()
   local -a snapshot_inputs=()
   [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
 
   printf 'schema\tactivity-resources\t1\n'
   printf 'sample\t%s\n' "$sample"
+  activity_memory_speed_rows
 
   for block_stat in "$sys_path"/class/block/*/stat; do
     [[ -r $block_stat ]] && block_stats+=("$block_stat")
+  done
+  for cpu_frequency_stat in \
+    "$sys_path"/devices/system/cpu/cpufreq/policy[0-9]*/scaling_cur_freq; do
+    [[ -r $cpu_frequency_stat ]] && cpu_frequency_stats+=("$cpu_frequency_stat")
   done
   [[ -r $proc_path/stat ]] && snapshot_inputs+=("$proc_path/stat")
   [[ -r $proc_path/meminfo ]] && snapshot_inputs+=("$proc_path/meminfo")
   [[ -r $proc_path/loadavg ]] && snapshot_inputs+=("$proc_path/loadavg")
   [[ -r $proc_path/net/route ]] && snapshot_inputs+=("$proc_path/net/route")
   [[ -r $proc_path/net/dev ]] && snapshot_inputs+=("$proc_path/net/dev")
-  (( ${#snapshot_inputs[@]} + ${#block_stats[@]} > 0 )) || return 0
+  if (( ${#cpu_frequency_stats[@]} == 0 )) && [[ -r $proc_path/cpuinfo ]]; then
+    snapshot_inputs+=("$proc_path/cpuinfo")
+  fi
+  (( ${#snapshot_inputs[@]} + ${#block_stats[@]} + ${#cpu_frequency_stats[@]} > 0 )) || return 0
 
   # Read the fast snapshot through one awk process. Besides avoiding repeated
   # startup costs, this keeps the route decision ahead of network rows and
@@ -551,6 +699,8 @@ activity_stats() {
     -v loadavg_path="$proc_path/loadavg" \
     -v route_path="$proc_path/net/route" \
     -v netdev_path="$proc_path/net/dev" \
+    -v cpuinfo_path="$proc_path/cpuinfo" \
+    -v cpufreq_root="$sys_path/devices/system/cpu/cpufreq/" \
     -v block_root="$sys_path/class/block/" \
     -v net_root="$sys_path/class/net/" '
       FILENAME == stat_path {
@@ -577,6 +727,22 @@ activity_stats() {
       FILENAME == loadavg_path {
         split($4, tasks, "/")
         printf "tasks\t%s\t%s\n", tasks[1], tasks[2]
+        next
+      }
+
+      index(FILENAME, cpufreq_root) == 1 {
+        if ($1 ~ /^[0-9]+([.][0-9]+)?$/) {
+          cpu_frequency_sum += $1 / 1000
+          cpu_frequency_count++
+        }
+        next
+      }
+
+      FILENAME == cpuinfo_path {
+        if ($1 == "cpu" && $2 == "MHz" && $4 ~ /^[0-9]+([.][0-9]+)?$/) {
+          cpu_frequency_sum += $4
+          cpu_frequency_count++
+        }
         next
       }
 
@@ -648,9 +814,15 @@ activity_stats() {
             memory_cached + memory_sreclaimable
         }
       }
+
+      END {
+        if (cpu_frequency_count > 0)
+          printf "frequency\tcpu\t%.0f\tMHz\n", cpu_frequency_sum / cpu_frequency_count
+      }
     ' \
     "${snapshot_inputs[@]}" \
-    "${block_stats[@]}"
+    "${block_stats[@]}" \
+    "${cpu_frequency_stats[@]}"
 
   return 0
 }

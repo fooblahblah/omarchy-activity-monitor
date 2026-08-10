@@ -10,6 +10,8 @@ const activity = requireFromRoot('Model.js')
 const first = activity.parseSnapshot([
   'schema\tactivity-resources\t1',
   'sample\t1000',
+  'frequency\tcpu\t2400\tMHz',
+  'frequency\tmemory\t6400\tMT/s',
   'cpu\tcpu\t1000\t700',
   'cpu\tcpu0\t500\t350',
   'cpu\tcpu1\t500\t350',
@@ -22,6 +24,8 @@ const first = activity.parseSnapshot([
 ].join('\n'))
 
 assertEqual(first.sample, 1000, 'activity parses the monotonic resource sample')
+assertEqual(first.cpuFrequencyMHz, 2400, 'activity parses the average current CPU clock')
+assertEqual(first.memorySpeedMTs, 6400, 'activity parses the configured DDR transfer rate')
 assertEqual(first.cores.length, 2, 'activity parses per-core counters')
 assertEqual(first.memory.cached, 125 * 1024, 'activity parses reclaimable cache')
 assertEqual(first.memory.swapTotal, 200 * 1024, 'activity parses swap counters')
@@ -34,6 +38,8 @@ assertEqual(
 const second = activity.parseSnapshot([
   'schema\tactivity-resources\t1',
   'sample\t1001',
+  'frequency\tcpu\t2600\tMHz',
+  'frequency\tmemory\t6400\tMT/s',
   'cpu\tcpu\t1200\t800',
   'cpu\tcpu0\t600\t390',
   'cpu\tcpu1\t600\t410',
@@ -411,12 +417,18 @@ grep -Fq 'model: root.sortedProcesses' "$panel_file" ||
   fail "activity process table silently caps the virtualized process list"
 grep -Fq 'Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
   fail "activity panel does not expose reclaimable memory cache"
-[[ $(grep -Fc 'label: "RAM USAGE"' "$panel_file") -eq 2 ]] ||
-  fail "activity panel does not distinguish used memory from cache"
+[[ $(grep -Fc 'label: root.memoryCardLabel()' "$panel_file") -eq 2 ]] ||
+  fail "activity panel does not place RAM speed in both card headings"
+[[ $(grep -Fc 'label: root.cpuCardLabel()' "$panel_file") -eq 2 ]] ||
+  fail "activity panel does not place CPU frequency in both card headings"
 grep -Fq 'function memoryBreakdownText()' "$panel_file" &&
   grep -Fq 'if (usedUnit && usedUnit === cacheUnit)' "$panel_file" &&
   grep -Fq '" · CACHE " + cacheText' "$panel_file" ||
   fail "activity RAM card does not show used memory and cache together"
+grep -Fq 'snapshot.memorySpeedMTs, "MT/s"' "$panel_file" &&
+  grep -Fq 'snapshot.cpuFrequencyMHz, "MHz"' "$panel_file" &&
+  grep -Fq 'adapters[0].frequencyMHz, "MHz"' "$panel_file" ||
+  fail "activity card headings do not distinguish DDR transfer rate from CPU and GPU clocks"
 grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
   fail "activity system details do not retain total RAM"
 grep -Fq 'label: "CORES"' "$panel_file" ||

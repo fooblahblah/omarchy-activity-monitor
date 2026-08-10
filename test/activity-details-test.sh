@@ -30,23 +30,23 @@ assertEqual(invalidStorage.available, 100, 'activity bounds available storage by
 const firstGpuSnapshot = activity.parseGpuSnapshot([
   'schema\tactivity-gpus\t1',
   'sample\t10',
-  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown',
+  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown\t600',
   'engine\t0000:00:02.0\tclient-a\trcs\t100\t1000\t1\tcycles',
   'engine\t0000:00:02.0\tclient-b\trcs\t50\t1000\t1\tcycles',
   'engine\t0000:00:02.0\tclient-a\tvcs\t40\t1000\t1\tcycles',
   'gpu-memory\t0000:00:02.0\tshared\t536870912',
-  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t62\t2147483648\t8589934592\tvram',
+  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t62\t2147483648\t8589934592\tvram\t1950',
   ''
 ].join('\n'))
 const secondGpuSnapshot = activity.parseGpuSnapshot([
   'schema\tactivity-gpus\t1',
   'sample\t12',
-  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown',
+  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown\t700',
   'engine\t0000:00:02.0\tclient-a\trcs\t200\t1200\t1\tcycles',
   'engine\t0000:00:02.0\tclient-b\trcs\t100\t1200\t1\tcycles',
   'engine\t0000:00:02.0\tclient-a\tvcs\t80\t1200\t1\tcycles',
   'gpu-memory\t0000:00:02.0\tshared\t805306368',
-  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t47\t3221225472\t8589934592\tvram',
+  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t47\t3221225472\t8589934592\tvram\t1905',
   ''
 ].join('\n'))
 const sampledGpus = activity.nextGpus(firstGpuSnapshot, secondGpuSnapshot)
@@ -56,16 +56,18 @@ assertEqual(firstGpuSnapshot.gpus.length, 2, 'activity keeps multiple GPU adapte
 assertEqual(firstGpuSnapshot.gpus[0].memoryKind, 'shared', 'activity labels DRM allocation as shared GPU memory')
 assertEqual(firstGpuSnapshot.gpus[0].memoryUsed, 536870912, 'activity parses resident shared GPU memory')
 assertEqual(sampledGpus[0].usage, 75, 'activity sums clients within an engine and avoids adding parallel engine classes')
+assertEqual(sampledGpus[0].frequencyMHz, 700, 'activity carries the current Intel GPU clock into display metrics')
 assertEqual(sampledGpus[0].memoryUsed, 805306368, 'activity carries current shared allocation into display metrics')
 assertEqual(sampledGpus[1].usage, 47, 'activity prefers a native GPU utilization reading')
+assertEqual(sampledGpus[1].frequencyMHz, 1905, 'activity parses the NVIDIA graphics clock')
 assertEqual(sampledGpus[1].memoryTotal, 8589934592, 'activity exposes dedicated VRAM capacity')
 
 const firstTimedGpu = activity.parseGpuSnapshot(
-  'schema\tactivity-gpus\t1\nsample\t20\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\n'
+  'schema\tactivity-gpus\t1\nsample\t20\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\t1800\n'
     + 'engine\t0000:03:00.0\t7\tgfx\t1000000000\t-1\t1\ttime\n'
 )
 const secondTimedGpu = activity.parseGpuSnapshot(
-  'schema\tactivity-gpus\t1\nsample\t22\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\n'
+  'schema\tactivity-gpus\t1\nsample\t22\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\t1750\n'
     + 'engine\t0000:03:00.0\t7\tgfx\t2000000000\t-1\t1\ttime\n'
 )
 assertEqual(
@@ -313,6 +315,10 @@ package_path="$powercap_path/intel-rapl:0"
 subzone_path="$powercap_path/intel-rapl:0:0"
 gpu_devices="$fixture_root/gpu-devices"
 gpu_drivers="$fixture_root/gpu-drivers"
+cpu_policy0="$sys_path/devices/system/cpu/cpufreq/policy0"
+cpu_policy1="$sys_path/devices/system/cpu/cpufreq/policy1"
+intel_frequency="$gpu_devices/0000:00:02.0/tile0/gt0/freq0"
+amd_hwmon="$gpu_devices/0000:03:00.0/hwmon/hwmon0"
 
 mkdir -p \
   "$fixture_root/bin" \
@@ -323,12 +329,16 @@ mkdir -p \
   "$sys_path/class/drm/card1" \
   "$sys_path/class/drm/card2" \
   "$sys_path/class/net/eth0/device" \
+  "$cpu_policy0" \
+  "$cpu_policy1" \
   "$gpu_devices/0000:00:02.0" \
   "$gpu_devices/0000:03:00.0" \
   "$gpu_devices/0000:04:00.0" \
   "$gpu_drivers/xe" \
   "$gpu_drivers/amdgpu" \
   "$gpu_drivers/nvidia" \
+  "$intel_frequency" \
+  "$amd_hwmon" \
   "$proc_path/500/fd" \
   "$proc_path/500/fdinfo" \
   "$proc_path/501/fd" \
@@ -347,6 +357,8 @@ printf 'Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame co
   >"$proc_path/net/dev"
 printf 'up\n' >"$sys_path/class/net/eth0/operstate"
 printf 'DRIVER=test\n' >"$sys_path/class/net/eth0/device/uevent"
+printf '2400000\n' >"$cpu_policy0/scaling_cur_freq"
+printf '3200000\n' >"$cpu_policy1/scaling_cur_freq"
 
 printf 'coretemp\n' >"$hwmon_path/name"
 printf '62500\n' >"$hwmon_path/temp1_input"
@@ -360,11 +372,13 @@ ln -s "$gpu_drivers/amdgpu" "$gpu_devices/0000:03:00.0/driver"
 ln -s "$gpu_drivers/nvidia" "$gpu_devices/0000:04:00.0/driver"
 printf '0x8086\n' >"$gpu_devices/0000:00:02.0/vendor"
 printf 'Intel Arc Fixture\n' >"$gpu_devices/0000:00:02.0/product_name"
+printf '600\n' >"$intel_frequency/act_freq"
 printf '0x1002\n' >"$gpu_devices/0000:03:00.0/vendor"
 printf 'AMD Radeon Fixture\n' >"$gpu_devices/0000:03:00.0/product_name"
 printf '47\n' >"$gpu_devices/0000:03:00.0/gpu_busy_percent"
 printf '268435456\n' >"$gpu_devices/0000:03:00.0/mem_info_vram_used"
 printf '2147483648\n' >"$gpu_devices/0000:03:00.0/mem_info_vram_total"
+printf '1800000000\n' >"$amd_hwmon/freq1_input"
 printf '0x10de\n' >"$gpu_devices/0000:04:00.0/vendor"
 printf 'NVIDIA Fixture\n' >"$gpu_devices/0000:04:00.0/product_name"
 
@@ -399,9 +413,16 @@ chmod +x "$fixture_root/bin/stat"
 
 printf '%s\n' \
   '#!/bin/bash' \
-  'printf "00000000:04:00.0, NVIDIA GeForce Fixture, 62, 2048, 8192\n"' \
+  'printf "00000000:04:00.0, NVIDIA GeForce Fixture, 62, 2048, 8192, 1950\n"' \
   >"$fixture_root/bin/nvidia-smi"
 chmod +x "$fixture_root/bin/nvidia-smi"
+
+printf '%s\n' \
+  '#!/bin/bash' \
+  '[[ $1 == info && $2 == --query=property && $3 == --path=/devices/virtual/dmi/id ]] || exit 64' \
+  'printf "MEMORY_DEVICE_0_SPEED_MTS=7200\nMEMORY_DEVICE_0_CONFIGURED_SPEED_GTS=6.4\n"' \
+  >"$fixture_root/bin/udevadm"
+chmod +x "$fixture_root/bin/udevadm"
 
 storage_snapshot=$(
   PATH="$fixture_root/bin:$PATH" \
@@ -433,15 +454,15 @@ gpu_snapshot=$(
 )
 grep -Fxq $'schema\tactivity-gpus\t1' <<<"$gpu_snapshot" ||
   fail "activity GPU output has its own schema"
-grep -Fxq $'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Fixture\t-1\t-1\t-1\tunknown' \
+grep -Fxq $'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Fixture\t-1\t-1\t-1\tunknown\t600' \
   <<<"$gpu_snapshot" ||
-  fail "activity GPU output identifies an Intel/Xe adapter"
-grep -Fxq $'gpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Radeon Fixture\t47\t268435456\t2147483648\tvram' \
+  fail "activity GPU output reads an Intel/Xe graphics clock"
+grep -Fxq $'gpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Radeon Fixture\t47\t268435456\t2147483648\tvram\t1800' \
   <<<"$gpu_snapshot" ||
-  fail "activity GPU output reads AMD busy percentage and VRAM counters"
-grep -Fxq $'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Fixture\t62\t2147483648\t8589934592\tvram' \
+  fail "activity GPU output reads AMD busy, VRAM, and graphics clock counters"
+grep -Fxq $'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Fixture\t62\t2147483648\t8589934592\tvram\t1950' \
   <<<"$gpu_snapshot" ||
-  fail "activity GPU output reads NVIDIA utilization and VRAM through nvidia-smi"
+  fail "activity GPU output reads NVIDIA utilization, VRAM, and graphics clock through nvidia-smi"
 grep -Fxq $'gpu-memory\t0000:00:02.0\tshared\t100663296' <<<"$gpu_snapshot" ||
   fail "activity GPU output does not aggregate shared DRM memory"
 [[ $(grep -c $'^engine\t0000:00:02.0\t77\trcs\t' <<<"$gpu_snapshot") -eq 1 ]] ||
@@ -497,7 +518,8 @@ grep -Fq $'temperature\thwmon1/temp1\tk10temp\tTctl\t55000' \
 pass "activity thermal reader caches and safely invalidates its CPU sensor"
 
 resource_snapshot=$(
-  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  PATH="$fixture_root/bin:$PATH" \
+    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
     "$ROOT/activity-stats" --activity-resources
 )
@@ -505,6 +527,10 @@ grep -Fxq $'schema\tactivity-resources\t1' <<<"$resource_snapshot" ||
   fail "activity resources output has its own schema"
 grep -Fxq $'memory\t1024\t512\t0\t0\t160' <<<"$resource_snapshot" ||
   fail "activity resources output includes page cache and reclaimable slabs"
+grep -Fxq $'frequency\tcpu\t2800\tMHz' <<<"$resource_snapshot" ||
+  fail "activity resources output averages current CPU policy frequencies"
+grep -Fxq $'frequency\tmemory\t6400\tMT/s' <<<"$resource_snapshot" ||
+  fail "activity resources output reads the configured DDR transfer rate"
 grep -Fxq $'network\teth0\t1000\t2000\tup\t1\t1' <<<"$resource_snapshot" ||
   fail "activity resources do not follow an up default route without a gateway"
 if grep -q '^temperature' <<<"$resource_snapshot"; then
@@ -514,7 +540,8 @@ pass "activity resources output avoids detailed sensor reads"
 
 rm -- "$proc_path/net/route"
 resource_without_route=$(
-  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+  PATH="$fixture_root/bin:$PATH" \
+    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
     OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
     "$ROOT/activity-stats" --activity-resources
 )
