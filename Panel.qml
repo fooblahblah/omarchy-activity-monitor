@@ -181,6 +181,17 @@ Panel {
     return name || "GPU"
   }
 
+  function gpuHeadingText() {
+    var adapters = Array.isArray(gpus) ? gpus : []
+    if (adapters.length === 0) return "GPU"
+    if (adapters.length > 1) return "GPU · " + adapters.length + " ADAPTERS"
+    var name = compactGpuName(adapters[0])
+    var bracketed = name.match(/\[([^\]]+)\]/g)
+    if (bracketed && bracketed.length > 0)
+      name = bracketed[bracketed.length - 1].slice(1, -1)
+    return "GPU · " + name.toUpperCase()
+  }
+
   function gpuUsageText(gpu) {
     var usage = Number(gpu && gpu.usage)
     return isFinite(usage) && usage >= 0 ? Math.round(usage) + "%" : "SAMPLING"
@@ -197,7 +208,7 @@ Panel {
     var total = Number(gpu && gpu.memoryTotal)
     if (!isFinite(used) || used < 0) return "UNAVAILABLE"
     var usedText = Model.formatBytes(used)
-    if (!isFinite(total) || total <= 0) return usedText + " USED"
+    if (!isFinite(total) || total <= 0) return usedText
     var totalText = Model.formatBytes(total)
     var usedSeparator = usedText.lastIndexOf(" ")
     var totalSeparator = totalText.lastIndexOf(" ")
@@ -214,12 +225,15 @@ Panel {
       items.push({ label: "STATUS", value: "DETECTING…" })
     } else if (adapters.length === 0) {
       items.push({ label: "STATUS", value: "NOT DETECTED" })
+    } else if (adapters.length === 1) {
+      items.push({ label: "USAGE", value: gpuUsageText(adapters[0]) })
+      items.push({ label: gpuMemoryLabel(adapters[0]), value: gpuMemoryText(adapters[0]) })
     } else {
       for (var i = 0; i < Math.min(2, adapters.length); i++) {
         var gpu = adapters[i]
         items.push({
           label: String(gpu.vendor || "GPU").toUpperCase(),
-          value: compactGpuName(gpu) + " · " + gpuUsageText(gpu)
+          value: gpuUsageText(gpu)
         })
         items.push({ label: gpuMemoryLabel(gpu), value: gpuMemoryText(gpu) })
       }
@@ -692,7 +706,7 @@ Panel {
               spacing: Style.spacing.labelGap
 
               PanelSectionHeader {
-                text: root.gpus.length > 1 ? "GPU · " + root.gpus.length + " ADAPTERS" : "GPU"
+                text: root.gpuHeadingText()
                 foreground: root.foreground
                 fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               }

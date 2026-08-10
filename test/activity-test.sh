@@ -332,7 +332,8 @@ pass "activity uses a plain logical CPU count instead of load average"
 
 grep -Fq 'text: "DISK STORAGE"' "$panel_file" ||
   fail "activity expanded details do not show disk storage"
-grep -Fq 'text: root.gpus.length > 1 ? "GPU · "' "$panel_file" ||
+grep -Fq 'text: root.gpuHeadingText()' "$panel_file" &&
+  grep -Fq 'items.push({ label: "USAGE", value: gpuUsageText(adapters[0]) })' "$panel_file" ||
   fail "activity expanded details do not show GPU adapters"
 grep -Fq 'return "SHARED"' "$panel_file" ||
   fail "activity panel does not distinguish integrated shared GPU memory"
