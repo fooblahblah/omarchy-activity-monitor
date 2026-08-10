@@ -22,14 +22,25 @@ omarchy plugin disable stappmus.activity-monitor
 The compact panel shows CPU, memory, network and disk activity plus the three
 busiest processes. Expand it with the button or `e` for per-core activity,
 memory, reclaimable cache and swap details, disk storage used and remaining,
-search, process sorting, estimated CPU-package watts, and a larger process list.
-Your own apps can be asked to close from the expanded view after a confirmation.
+GPU utilization and memory, search, process sorting, estimated CPU-package
+watts, and a larger process list. Your own apps can be asked to close from the
+expanded view after a confirmation.
 
 The `RAM USAGE` card shows used memory and cache together. Used memory follows
 Linux's available-memory accounting: `(MemTotal - MemAvailable) / MemTotal`.
 Cache is `Cached + SReclaimable`, matching `free`'s cache column. Linux can
 reuse that cache automatically when applications need RAM, so it is not an
 extra amount to add to used memory.
+
+The `GPU` square lists up to two adapters separately. NVIDIA and discrete AMD
+cards show used/total VRAM when their drivers expose it. Integrated GPUs show
+`SHARED GPU MEM`: the reported system-memory allocation currently resident for
+readable desktop GPU clients. Shared GPU memory is part of RAM and grows
+dynamically, so the panel deliberately shows the amount in use without
+inventing a fixed GPU memory total. Intel/Xe and compatible drivers use
+standard DRM client counters; AMD uses its kernel busy/VRAM counters, and
+NVIDIA uses `nvidia-smi` from the installed driver. Missing measurements remain
+visibly unavailable.
 
 The expanded CPU card shows the measured total CPU-package watts. Individual
 process rows show their estimated share of that total.
@@ -45,13 +56,14 @@ Keyboard shortcuts in the expanded view:
 - `x`: confirm closing the explicitly selected app
 - `e` or `Esc`: collapse
 
-The widget keeps one stdin-driven plugin-local stats reader alive only
-while its panel is open. Resource, process, temperature, and storage requests
+The widget keeps one stdin-driven plugin-local stats reader alive only while
+its panel is open. Resource, process, temperature, GPU, and storage requests
 retain their independent refresh cadences without repeatedly launching
-collectors. Its process scanner starts lazily with the first process request
-and is then reused for the rest of the panel session. It reads Linux
-procfs/sysfs directly, requires no monitoring daemon, and hides measurements
-the hardware does not expose.
+collectors. GPU and energy sampling run only while the advanced view is
+expanded. Its process scanner starts lazily with the first process request and
+is then reused for the rest of the panel session. It reads Linux procfs/sysfs
+directly, requires no monitoring daemon, and marks measurements the hardware
+does not expose as unavailable.
 
 App actions use a PID file descriptor plus the sampled process start time,
 resolve worker processes to a verified same-user app ancestor, reject foreign
@@ -100,13 +112,13 @@ sudo pacman -Rns omarchy-activity-monitor-power-helper
 - `Model.js` contains snapshot factories, parsers, calculations, formatting,
   sorting, and side-effect-free UI policy helpers.
 
-Resource, thermal, storage, package-energy, and derived-metric models remain
-separate rather than being merged into a catch-all snapshot. The QML action
-policy only provides immediate feedback; the plugin-local process helper always
-revalidates live procfs identity, ownership, state, and protection before it
-signals anything. All helpers live at the plugin root and are addressed by
-absolute plugin-relative paths, avoiding dependence on Omarchy's packaged
-command tree.
+Resource, thermal, GPU, storage, package-energy, and derived-metric models
+remain separate rather than being merged into a catch-all snapshot. The QML
+action policy only provides immediate feedback; the plugin-local process
+helper always revalidates live procfs identity, ownership, state, and
+protection before it signals anything. All helpers live at the plugin root and
+are addressed by absolute plugin-relative paths, avoiding dependence on
+Omarchy's packaged command tree.
 
 ## Remove
 

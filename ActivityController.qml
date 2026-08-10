@@ -24,6 +24,8 @@ Item {
   readonly property var snapshot: _snapshot
   readonly property var thermalSnapshot: _thermalSnapshot
   readonly property var storageSnapshot: _storageSnapshot
+  readonly property var gpuSnapshot: _gpuSnapshot
+  readonly property var gpus: _gpus
   readonly property var processPower: _processPower
   readonly property var processes: _processes
   readonly property var metrics: _metrics
@@ -42,12 +44,15 @@ Item {
   readonly property int refreshInterval: boundedSetting("refreshIntervalMs", 1500, 500, 10000)
   readonly property int processRefreshInterval: boundedSetting("processRefreshIntervalMs", 3000, 1000, 15000)
   readonly property int thermalRefreshInterval: boundedSetting("thermalRefreshIntervalMs", 10000, 3000, 60000)
+  readonly property int gpuRefreshInterval: boundedSetting("gpuRefreshIntervalMs", 2000, 1000, 15000)
   readonly property int storageRefreshInterval: boundedSetting("storageRefreshIntervalMs", 30000, 10000, 120000)
   readonly property int historySamples: boundedSetting("historySamples", 60, 20, 240)
 
   property var _snapshot: Model.emptySnapshot()
   property var _thermalSnapshot: Model.emptyThermalSnapshot()
   property var _storageSnapshot: Model.emptyStorageSnapshot()
+  property var _gpuSnapshot: Model.emptyGpuSnapshot()
+  property var _gpus: []
   property var _processPower: Model.emptyPower()
   property var _processes: []
   property var _metrics: Model.emptyMetrics()
@@ -56,12 +61,14 @@ Item {
   property var _previousSnapshot: Model.emptySnapshot()
   property var _previousProcessSnapshot: Model.emptyProcessSnapshot()
   property var _previousProcessPowerSnapshot: Model.emptyPackagePowerSnapshot()
+  property var _previousGpuSnapshot: Model.emptyGpuSnapshot()
 
   property var _statsReaderBuffer: []
   property bool _statsReaderReady: false
   property bool _resourceSamplePending: false
   property bool _processSamplePending: false
   property bool _thermalSamplePending: false
+  property bool _gpuSamplePending: false
   property bool _storageSamplePending: false
 
   property var _processPowerBuffer: []
@@ -83,6 +90,7 @@ Item {
     if (kind === "resources") return _resourceSamplePending
     if (kind === "processes") return _processSamplePending
     if (kind === "thermals") return _thermalSamplePending
+    if (kind === "gpus") return _gpuSamplePending
     if (kind === "storage") return _storageSamplePending
     return false
   }
@@ -91,6 +99,7 @@ Item {
     return _resourceSamplePending
       || _processSamplePending
       || _thermalSamplePending
+      || _gpuSamplePending
       || _storageSamplePending
   }
 
@@ -98,6 +107,7 @@ Item {
     if (kind === "resources") _resourceSamplePending = value
     else if (kind === "processes") _processSamplePending = value
     else if (kind === "thermals") _thermalSamplePending = value
+    else if (kind === "gpus") _gpuSamplePending = value
     else if (kind === "storage") _storageSamplePending = value
   }
 
@@ -107,6 +117,7 @@ Item {
     _resourceSamplePending = false
     _processSamplePending = false
     _thermalSamplePending = false
+    _gpuSamplePending = false
     _storageSamplePending = false
     statsReaderWatchdog.stop()
   }
@@ -131,6 +142,7 @@ Item {
     if (_resourceSamplePending) statsReaderProc.write("resources\n")
     if (_processSamplePending) statsReaderProc.write("processes\n")
     if (_thermalSamplePending) statsReaderProc.write("thermals\n")
+    if (_gpuSamplePending) statsReaderProc.write("gpus\n")
     if (_storageSamplePending) statsReaderProc.write("storage\n")
   }
 
@@ -144,6 +156,10 @@ Item {
 
   function refreshThermals() {
     sendStatsRequest("thermals")
+  }
+
+  function refreshGpus() {
+    if (expanded) sendStatsRequest("gpus")
   }
 
   function refreshStorage() {
@@ -166,6 +182,7 @@ Item {
     if (kind === "resources") consumeSnapshot(raw)
     else if (kind === "processes") consumeProcesses(raw)
     else if (kind === "thermals") consumeThermals(raw)
+    else if (kind === "gpus") consumeGpus(raw)
     else if (kind === "storage") consumeStorage(raw)
   }
 
@@ -230,6 +247,7 @@ Item {
     refreshResources()
     refreshProcessCycle()
     refreshThermals()
+    refreshGpus()
     refreshStorage()
   }
 
@@ -251,6 +269,15 @@ Item {
     var next = Model.parseStorageSnapshot(raw)
     if (next.schema !== 1 || next.sample <= 0) return
     _storageSnapshot = next
+  }
+
+  function consumeGpus(raw) {
+    if (!expanded) return
+    var next = Model.parseGpuSnapshot(raw)
+    if (next.schema !== 1 || next.sample <= 0) return
+    _gpus = Model.nextGpus(_previousGpuSnapshot, next)
+    _previousGpuSnapshot = next
+    _gpuSnapshot = next
   }
 
   function consumeProcessPower(raw) {
@@ -308,6 +335,12 @@ Item {
     _processes = Model.estimateProcessPower(processes, -1, -1)
   }
 
+  function resetGpuMeasurement() {
+    _gpuSnapshot = Model.emptyGpuSnapshot()
+    _previousGpuSnapshot = Model.emptyGpuSnapshot()
+    _gpus = []
+  }
+
   function markProcessPowerUnavailable() {
     _processPowerState = powerStateUnavailable
     resetProcessPowerMeasurement()
@@ -317,6 +350,8 @@ Item {
     _snapshot = Model.emptySnapshot()
     _thermalSnapshot = Model.emptyThermalSnapshot()
     _storageSnapshot = Model.emptyStorageSnapshot()
+    _gpuSnapshot = Model.emptyGpuSnapshot()
+    _gpus = []
     _processPower = Model.emptyPower()
     _processes = []
     _metrics = Model.emptyMetrics()
@@ -325,6 +360,7 @@ Item {
     _previousSnapshot = Model.emptySnapshot()
     _previousProcessSnapshot = Model.emptyProcessSnapshot()
     _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
+    _previousGpuSnapshot = Model.emptyGpuSnapshot()
     resetStatsReaderState()
     _processPowerBuffer = []
     _processPowerSamplePending = false
@@ -352,8 +388,10 @@ Item {
     if (!expanded) {
       stopProcessPowerReader()
       resetProcessPowerMeasurement()
+      resetGpuMeasurement()
     } else if (active) {
       refreshProcessCycle()
+      refreshGpus()
     }
   }
 
@@ -460,6 +498,13 @@ Item {
     running: root.active
     repeat: true
     onTriggered: root.refreshThermals()
+  }
+
+  Timer {
+    interval: root.gpuRefreshInterval
+    running: root.active && root.expanded
+    repeat: true
+    onTriggered: root.refreshGpus()
   }
 
   Timer {

@@ -27,6 +27,58 @@ const invalidStorage = activity.parseStorageSnapshot(
 assertEqual(invalidStorage.used, 100, 'activity bounds used storage by filesystem size')
 assertEqual(invalidStorage.available, 100, 'activity bounds available storage by filesystem size')
 
+const firstGpuSnapshot = activity.parseGpuSnapshot([
+  'schema\tactivity-gpus\t1',
+  'sample\t10',
+  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown',
+  'engine\t0000:00:02.0\tclient-a\trcs\t100\t1000\t1\tcycles',
+  'engine\t0000:00:02.0\tclient-b\trcs\t50\t1000\t1\tcycles',
+  'engine\t0000:00:02.0\tclient-a\tvcs\t40\t1000\t1\tcycles',
+  'gpu-memory\t0000:00:02.0\tshared\t536870912',
+  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t62\t2147483648\t8589934592\tvram',
+  ''
+].join('\n'))
+const secondGpuSnapshot = activity.parseGpuSnapshot([
+  'schema\tactivity-gpus\t1',
+  'sample\t12',
+  'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Test\t-1\t-1\t-1\tunknown',
+  'engine\t0000:00:02.0\tclient-a\trcs\t200\t1200\t1\tcycles',
+  'engine\t0000:00:02.0\tclient-b\trcs\t100\t1200\t1\tcycles',
+  'engine\t0000:00:02.0\tclient-a\tvcs\t80\t1200\t1\tcycles',
+  'gpu-memory\t0000:00:02.0\tshared\t805306368',
+  'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Test\t47\t3221225472\t8589934592\tvram',
+  ''
+].join('\n'))
+const sampledGpus = activity.nextGpus(firstGpuSnapshot, secondGpuSnapshot)
+
+assertEqual(firstGpuSnapshot.schema, 1, 'activity parses the GPU schema version')
+assertEqual(firstGpuSnapshot.gpus.length, 2, 'activity keeps multiple GPU adapters separate')
+assertEqual(firstGpuSnapshot.gpus[0].memoryKind, 'shared', 'activity labels DRM allocation as shared GPU memory')
+assertEqual(firstGpuSnapshot.gpus[0].memoryUsed, 536870912, 'activity parses resident shared GPU memory')
+assertEqual(sampledGpus[0].usage, 75, 'activity sums clients within an engine and avoids adding parallel engine classes')
+assertEqual(sampledGpus[0].memoryUsed, 805306368, 'activity carries current shared allocation into display metrics')
+assertEqual(sampledGpus[1].usage, 47, 'activity prefers a native GPU utilization reading')
+assertEqual(sampledGpus[1].memoryTotal, 8589934592, 'activity exposes dedicated VRAM capacity')
+
+const firstTimedGpu = activity.parseGpuSnapshot(
+  'schema\tactivity-gpus\t1\nsample\t20\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\n'
+    + 'engine\t0000:03:00.0\t7\tgfx\t1000000000\t-1\t1\ttime\n'
+)
+const secondTimedGpu = activity.parseGpuSnapshot(
+  'schema\tactivity-gpus\t1\nsample\t22\ngpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Test\t-1\t-1\t-1\tunknown\n'
+    + 'engine\t0000:03:00.0\t7\tgfx\t2000000000\t-1\t1\ttime\n'
+)
+assertEqual(
+  activity.nextGpus(firstTimedGpu, secondTimedGpu)[0].usage,
+  50,
+  'activity derives utilization from standard DRM nanosecond engine counters'
+)
+assertEqual(
+  activity.nextGpus(activity.emptyGpuSnapshot(), firstGpuSnapshot)[0].usage,
+  -1,
+  'activity waits for a baseline before presenting counter-based GPU usage'
+)
+
 const thermals = activity.parseThermalSnapshot([
   'schema\tactivity-thermals\t1',
   'sample\t100.25',
@@ -259,13 +311,28 @@ hwmon_path="$sys_path/class/hwmon/hwmon0"
 powercap_path="$sys_path/class/powercap/intel-rapl"
 package_path="$powercap_path/intel-rapl:0"
 subzone_path="$powercap_path/intel-rapl:0:0"
+gpu_devices="$fixture_root/gpu-devices"
+gpu_drivers="$fixture_root/gpu-drivers"
 
 mkdir -p \
   "$fixture_root/bin" \
   "$proc_path/net" \
   "$fixture_root/root filesystem" \
   "$sys_path/class/block" \
+  "$sys_path/class/drm/card0" \
+  "$sys_path/class/drm/card1" \
+  "$sys_path/class/drm/card2" \
   "$sys_path/class/net/eth0/device" \
+  "$gpu_devices/0000:00:02.0" \
+  "$gpu_devices/0000:03:00.0" \
+  "$gpu_devices/0000:04:00.0" \
+  "$gpu_drivers/xe" \
+  "$gpu_drivers/amdgpu" \
+  "$gpu_drivers/nvidia" \
+  "$proc_path/500/fd" \
+  "$proc_path/500/fdinfo" \
+  "$proc_path/501/fd" \
+  "$proc_path/501/fdinfo" \
   "$hwmon_path" \
   "$package_path" \
   "$subzone_path"
@@ -285,6 +352,43 @@ printf 'coretemp\n' >"$hwmon_path/name"
 printf '62500\n' >"$hwmon_path/temp1_input"
 printf 'Package id 0\n' >"$hwmon_path/temp1_label"
 
+ln -s "$gpu_devices/0000:00:02.0" "$sys_path/class/drm/card0/device"
+ln -s "$gpu_devices/0000:03:00.0" "$sys_path/class/drm/card1/device"
+ln -s "$gpu_devices/0000:04:00.0" "$sys_path/class/drm/card2/device"
+ln -s "$gpu_drivers/xe" "$gpu_devices/0000:00:02.0/driver"
+ln -s "$gpu_drivers/amdgpu" "$gpu_devices/0000:03:00.0/driver"
+ln -s "$gpu_drivers/nvidia" "$gpu_devices/0000:04:00.0/driver"
+printf '0x8086\n' >"$gpu_devices/0000:00:02.0/vendor"
+printf 'Intel Arc Fixture\n' >"$gpu_devices/0000:00:02.0/product_name"
+printf '0x1002\n' >"$gpu_devices/0000:03:00.0/vendor"
+printf 'AMD Radeon Fixture\n' >"$gpu_devices/0000:03:00.0/product_name"
+printf '47\n' >"$gpu_devices/0000:03:00.0/gpu_busy_percent"
+printf '268435456\n' >"$gpu_devices/0000:03:00.0/mem_info_vram_used"
+printf '2147483648\n' >"$gpu_devices/0000:03:00.0/mem_info_vram_total"
+printf '0x10de\n' >"$gpu_devices/0000:04:00.0/vendor"
+printf 'NVIDIA Fixture\n' >"$gpu_devices/0000:04:00.0/product_name"
+
+printf '%s\n' \
+  $'drm-driver:\txe' \
+  $'drm-client-id:\t77' \
+  $'drm-pdev:\t0000:00:02.0' \
+  $'drm-resident-gtt:\t64 MiB' \
+  $'drm-cycles-rcs:\t100' \
+  $'drm-total-cycles-rcs:\t1000' \
+  >"$proc_path/500/fdinfo/5"
+cp "$proc_path/500/fdinfo/5" "$proc_path/500/fdinfo/6"
+ln -s /dev/dri/renderD128 "$proc_path/500/fd/5"
+ln -s /dev/dri/renderD128 "$proc_path/500/fd/6"
+printf '%s\n' \
+  $'drm-driver:\txe' \
+  $'drm-client-id:\t78' \
+  $'drm-pdev:\t0000:00:02.0' \
+  $'drm-resident-gtt:\t32 MiB' \
+  $'drm-cycles-rcs:\t50' \
+  $'drm-total-cycles-rcs:\t1000' \
+  >"$proc_path/501/fdinfo/8"
+ln -s /dev/dri/renderD128 "$proc_path/501/fd/8"
+
 printf '%s\n' \
   '#!/bin/bash' \
   '[[ $1 == -f && $2 == -c && $4 == -- ]] || exit 64' \
@@ -292,6 +396,12 @@ printf '%s\n' \
   'printf '"'"'4096\t1000\t250\t200\n'"'" \
   >"$fixture_root/bin/stat"
 chmod +x "$fixture_root/bin/stat"
+
+printf '%s\n' \
+  '#!/bin/bash' \
+  'printf "00000000:04:00.0, NVIDIA GeForce Fixture, 62, 2048, 8192\n"' \
+  >"$fixture_root/bin/nvidia-smi"
+chmod +x "$fixture_root/bin/nvidia-smi"
 
 storage_snapshot=$(
   PATH="$fixture_root/bin:$PATH" \
@@ -314,6 +424,31 @@ expected_thermals=$'schema\tactivity-thermals\t1\nsample\t321.50\ntemperature\th
 [[ $thermal_snapshot == "$expected_thermals" ]] ||
   fail "activity CPU thermal output is exact and versioned" "$thermal_snapshot"
 pass "activity CPU thermal output is exact and versioned"
+
+gpu_snapshot=$(
+  PATH="$fixture_root/bin:$PATH" \
+    OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+    OMARCHY_SYSTEM_STATS_SYS_PATH="$sys_path" \
+    "$ROOT/activity-stats" --activity-gpus
+)
+grep -Fxq $'schema\tactivity-gpus\t1' <<<"$gpu_snapshot" ||
+  fail "activity GPU output has its own schema"
+grep -Fxq $'gpu\t0000:00:02.0\tIntel\txe\tIntel Arc Fixture\t-1\t-1\t-1\tunknown' \
+  <<<"$gpu_snapshot" ||
+  fail "activity GPU output identifies an Intel/Xe adapter"
+grep -Fxq $'gpu\t0000:03:00.0\tAMD\tamdgpu\tAMD Radeon Fixture\t47\t268435456\t2147483648\tvram' \
+  <<<"$gpu_snapshot" ||
+  fail "activity GPU output reads AMD busy percentage and VRAM counters"
+grep -Fxq $'gpu\t0000:04:00.0\tNVIDIA\tnvidia\tNVIDIA GeForce Fixture\t62\t2147483648\t8589934592\tvram' \
+  <<<"$gpu_snapshot" ||
+  fail "activity GPU output reads NVIDIA utilization and VRAM through nvidia-smi"
+grep -Fxq $'gpu-memory\t0000:00:02.0\tshared\t100663296' <<<"$gpu_snapshot" ||
+  fail "activity GPU output does not aggregate shared DRM memory"
+[[ $(grep -c $'^engine\t0000:00:02.0\t77\trcs\t' <<<"$gpu_snapshot") -eq 1 ]] ||
+  fail "activity GPU output double-counts duplicated DRM file descriptors"
+[[ $(grep -c $'^engine\t0000:00:02.0\t78\trcs\t' <<<"$gpu_snapshot") -eq 1 ]] ||
+  fail "activity GPU output loses a distinct DRM client"
+pass "activity GPU collector supports shared Intel, AMD, NVIDIA, and multiple adapters"
 
 read_thermal_frame() {
   local output_fd="$1"

@@ -29,6 +29,8 @@ Panel {
   readonly property color dim: Color.muted
   readonly property var snapshot: activity.snapshot
   readonly property var storageSnapshot: activity.storageSnapshot
+  readonly property var gpuSnapshot: activity.gpuSnapshot
+  readonly property var gpus: activity.gpus
   readonly property var processPower: activity.processPower
   readonly property var processes: activity.processes
   readonly property var metrics: activity.metrics
@@ -58,6 +60,7 @@ Panel {
   readonly property var selectedProcess: sortedProcesses.length > 0
     ? sortedProcesses[Math.max(0, Math.min(selectedProcessIndex, sortedProcesses.length - 1))]
     : null
+  readonly property var gpuDetailItems: buildGpuDetailItems()
 
   function refresh() {
     activity.refresh()
@@ -166,6 +169,84 @@ Panel {
     var cacheUnit = cacheSeparator >= 0 ? cacheText.slice(cacheSeparator + 1) : ""
     if (usedUnit && usedUnit === cacheUnit) usedText = usedText.slice(0, usedSeparator)
     return "USED " + usedText + " · CACHE " + cacheText
+  }
+
+  function compactGpuName(gpu) {
+    var name = String(gpu && gpu.name || "GPU")
+    name = name.replace(/^Intel Corporation[ ]*/i, "")
+      .replace(/^NVIDIA Corporation[ ]*/i, "")
+      .replace(/^NVIDIA[ ]*/i, "")
+      .replace(/^Advanced Micro Devices[^]]*\][ ]*/i, "")
+      .replace(/^AMD[ ]*/i, "")
+    return name || "GPU"
+  }
+
+  function gpuUsageText(gpu) {
+    var usage = Number(gpu && gpu.usage)
+    return isFinite(usage) && usage >= 0 ? Math.round(usage) + "%" : "SAMPLING"
+  }
+
+  function gpuMemoryLabel(gpu) {
+    if (gpu && gpu.memoryKind === "shared") return "SHARED GPU MEM"
+    if (gpu && gpu.memoryKind === "vram") return "VRAM"
+    return "GPU MEMORY"
+  }
+
+  function gpuMemoryText(gpu) {
+    var used = Number(gpu && gpu.memoryUsed)
+    var total = Number(gpu && gpu.memoryTotal)
+    if (!isFinite(used) || used < 0) return "UNAVAILABLE"
+    var usedText = Model.formatBytes(used)
+    if (!isFinite(total) || total <= 0) return usedText + " USED"
+    var totalText = Model.formatBytes(total)
+    var usedSeparator = usedText.lastIndexOf(" ")
+    var totalSeparator = totalText.lastIndexOf(" ")
+    if (usedSeparator >= 0 && totalSeparator >= 0
+        && usedText.slice(usedSeparator + 1) === totalText.slice(totalSeparator + 1))
+      usedText = usedText.slice(0, usedSeparator)
+    return usedText + " / " + totalText
+  }
+
+  function buildGpuDetailItems() {
+    var items = []
+    var adapters = Array.isArray(gpus) ? gpus : []
+    if (gpuSnapshot.sample <= 0) {
+      items.push({ label: "STATUS", value: "DETECTING…" })
+    } else if (adapters.length === 0) {
+      items.push({ label: "STATUS", value: "NOT DETECTED" })
+    } else {
+      for (var i = 0; i < Math.min(2, adapters.length); i++) {
+        var gpu = adapters[i]
+        items.push({
+          label: String(gpu.vendor || "GPU").toUpperCase(),
+          value: compactGpuName(gpu) + " · " + gpuUsageText(gpu)
+        })
+        items.push({ label: gpuMemoryLabel(gpu), value: gpuMemoryText(gpu) })
+      }
+      if (adapters.length > 2)
+        items[items.length - 1] = { label: "ADAPTERS", value: "2 OF " + adapters.length + " SHOWN" }
+    }
+
+    var systemItems = [
+      {
+        label: "RAM TOTAL",
+        value: snapshot.memory.total ? Model.formatBytes(snapshot.memory.total) : "—"
+      },
+      {
+        label: "SWAP",
+        value: snapshot.memory.swapTotal ? percentText(metrics.swap) : "NONE"
+      },
+      {
+        label: "CORES",
+        value: snapshot.cores.length ? snapshot.cores.length + " LOGICAL" : "—"
+      },
+      {
+        label: "TASKS",
+        value: snapshot.tasks.running + "/" + snapshot.tasks.total
+      }
+    ]
+    for (var j = 0; items.length < 4 && j < systemItems.length; j++) items.push(systemItems[j])
+    return items.slice(0, 4)
   }
 
   function pressureColor(value) {
@@ -611,7 +692,7 @@ Panel {
               spacing: Style.spacing.labelGap
 
               PanelSectionHeader {
-                text: "SYSTEM"
+                text: root.gpus.length > 1 ? "GPU · " + root.gpus.length + " ADAPTERS" : "GPU"
                 foreground: root.foreground
                 fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               }
@@ -624,26 +705,7 @@ Panel {
                 rowSpacing: Style.spacing.xxs
 
                 Repeater {
-                  model: [
-                    {
-                      label: "RAM TOTAL",
-                      value: root.snapshot.memory.total
-                        ? Model.formatBytes(root.snapshot.memory.total)
-                        : "—"
-                    },
-                    {
-                      label: "SWAP",
-                      value: root.snapshot.memory.swapTotal ? root.percentText(root.metrics.swap) : "NONE"
-                    },
-                    {
-                      label: "CORES",
-                      value: root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL" : "—"
-                    },
-                    {
-                      label: "TASKS",
-                      value: root.snapshot.tasks.running + "/" + root.snapshot.tasks.total
-                    }
-                  ]
+                  model: root.gpuDetailItems
 
                   DetailLine {
                     required property var modelData

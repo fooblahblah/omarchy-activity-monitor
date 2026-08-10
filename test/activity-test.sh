@@ -149,6 +149,13 @@ grep -Eq '^network[[:space:]]' <<<"$snapshot" || fail "activity collector emits 
 grep -Eq '^disk[[:space:]]' <<<"$snapshot" || fail "activity collector emits disk counters"
 pass "activity collector emits the resource snapshot contract"
 
+gpu_snapshot=$("$ROOT/activity-stats" --activity-gpus)
+grep -Eq '^schema[[:space:]]+activity-gpus[[:space:]]+1$' <<<"$gpu_snapshot" ||
+  fail "activity GPU collector emits its schema"
+grep -Eq '^sample[[:space:]][0-9]+([.][0-9]+)?$' <<<"$gpu_snapshot" ||
+  fail "activity GPU collector emits a monotonic sample"
+pass "activity collector emits the independent GPU snapshot contract"
+
 process_snapshot=$("$ROOT/activity-stats" --activity-processes)
 grep -Eq '^schema[[:space:]]+activity-processes[[:space:]]+1$' <<<"$process_snapshot" || fail "activity process collector emits its schema"
 grep -Eq '^sample[[:space:]][0-9]+([.][0-9]+)?[[:space:]][0-9]+[[:space:]][0-9]+$' <<<"$process_snapshot" ||
@@ -167,10 +174,10 @@ process_reader_snapshot=$(
 pass "activity process reader serves repeated snapshots from one process"
 
 reader_snapshot=$(
-  printf 'resources\nprocesses\nprocesses\nthermals\nstorage\n' |
+  printf 'resources\nprocesses\nprocesses\nthermals\ngpus\nstorage\n' |
     "$ROOT/activity-stats" --activity-reader
 )
-[[ $(grep -c '^snapshot-end' <<<"$reader_snapshot") -eq 5 ]] ||
+[[ $(grep -c '^snapshot-end' <<<"$reader_snapshot") -eq 6 ]] ||
   fail "activity reader does not frame every requested snapshot"
 grep -Fq $'snapshot-end\tresources' <<<"$reader_snapshot" ||
   fail "activity reader does not frame resource snapshots"
@@ -180,6 +187,8 @@ grep -Fq $'snapshot-end\tprocesses' <<<"$reader_snapshot" ||
   fail "activity reader does not reuse its process helper"
 grep -Fq $'snapshot-end\tthermals' <<<"$reader_snapshot" ||
   fail "activity reader does not frame thermal snapshots"
+grep -Fq $'snapshot-end\tgpus' <<<"$reader_snapshot" ||
+  fail "activity reader does not frame GPU snapshots"
 grep -Fq $'snapshot-end\tstorage' <<<"$reader_snapshot" ||
   fail "activity reader does not frame storage snapshots"
 pass "activity reader reuses one process for independently requested snapshots"
@@ -323,6 +332,12 @@ pass "activity uses a plain logical CPU count instead of load average"
 
 grep -Fq 'text: "DISK STORAGE"' "$panel_file" ||
   fail "activity expanded details do not show disk storage"
+grep -Fq 'text: root.gpus.length > 1 ? "GPU · "' "$panel_file" ||
+  fail "activity expanded details do not show GPU adapters"
+grep -Fq 'return "SHARED GPU MEM"' "$panel_file" ||
+  fail "activity panel does not distinguish integrated shared GPU memory"
+grep -Fq 'return "VRAM"' "$panel_file" ||
+  fail "activity panel does not label dedicated GPU memory"
 grep -Fq 'text: "USED"' "$panel_file" ||
   fail "activity storage details do not show used storage"
 grep -Fq 'text: "REMAINING"' "$panel_file" ||
@@ -358,6 +373,7 @@ grep -Fq 'root.refreshProcessCycle()' "$controller_file" ||
 grep -Fq 'onTriggered: root.refreshResources()' "$controller_file" &&
   grep -Fq 'onTriggered: root.refreshProcessCycle()' "$controller_file" &&
   grep -Fq 'onTriggered: root.refreshThermals()' "$controller_file" &&
+  grep -Fq 'onTriggered: root.refreshGpus()' "$controller_file" &&
   grep -Fq 'onTriggered: root.refreshStorage()' "$controller_file" ||
   fail "activity panel does not preserve each configured refresh cadence"
 grep -Fq 'id: statsReaderWatchdog' "$controller_file" &&
@@ -372,6 +388,9 @@ fi
 if grep -Eq 'activity-package-power|refreshPackagePower|packagePowerProc' "$controller_file"; then
   fail "activity panel still polls package power"
 fi
+grep -Fq 'running: root.active && root.expanded' "$controller_file" &&
+  grep -Fq 'resetGpuMeasurement()' "$controller_file" ||
+  fail "activity panel samples GPU details while the advanced view is collapsed"
 pass "activity controller owns explicit reader states and independent refresh cadences"
 
 grep -Fq 'text: "EST. W"' "$panel_file" ||

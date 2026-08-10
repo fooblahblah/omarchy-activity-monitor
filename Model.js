@@ -89,6 +89,39 @@ function emptyStorageSnapshot() {
   }
 }
 
+function emptyGpuSnapshot() {
+  return {
+    schema: 0,
+    sample: 0,
+    gpus: []
+  }
+}
+
+function gpuSnapshotEntry(snapshot, id) {
+  var gpuId = String(id || "")
+  for (var i = 0; i < snapshot.gpus.length; i++) {
+    if (snapshot.gpus[i].id === gpuId) return snapshot.gpus[i]
+  }
+
+  var gpu = {
+    id: gpuId,
+    vendor: "GPU",
+    driver: "unknown",
+    name: "GPU",
+    directUtilization: -1,
+    memoryUsed: -1,
+    memoryTotal: -1,
+    memoryKind: "unknown",
+    engines: [],
+    dedicatedMemory: 0,
+    sharedMemory: 0,
+    dedicatedMemorySeen: false,
+    sharedMemorySeen: false
+  }
+  snapshot.gpus.push(gpu)
+  return gpu
+}
+
 function temperatureFromFields(fields) {
   return {
     id: String(fields[1] || ""),
@@ -257,6 +290,136 @@ function parseStorageSnapshot(raw) {
   }
 
   return snapshot
+}
+
+function parseGpuSnapshot(raw) {
+  var snapshot = emptyGpuSnapshot()
+  var lines = String(raw || "").split("\n")
+
+  for (var i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue
+    var fields = lines[i].split("\t")
+    var kind = fields[0]
+
+    if (kind === "schema") {
+      snapshot.schema = fields[1] === "activity-gpus" ? number(fields[2]) : 0
+    } else if (kind === "sample") {
+      snapshot.sample = number(fields[1])
+    } else if (kind === "gpu") {
+      var gpu = gpuSnapshotEntry(snapshot, fields[1])
+      gpu.vendor = String(fields[2] || "GPU")
+      gpu.driver = String(fields[3] || "unknown")
+      gpu.name = String(fields[4] || gpu.vendor + " GPU")
+      gpu.directUtilization = Math.max(-1, number(fields[5], -1))
+      gpu.memoryUsed = Math.max(-1, number(fields[6], -1))
+      gpu.memoryTotal = Math.max(-1, number(fields[7], -1))
+      gpu.memoryKind = String(fields[8] || "unknown")
+    } else if (kind === "engine") {
+      gpuSnapshotEntry(snapshot, fields[1]).engines.push({
+        client: String(fields[2] || ""),
+        name: String(fields[3] || "engine"),
+        busy: Math.max(0, number(fields[4])),
+        total: number(fields[5], -1),
+        capacity: Math.max(1, number(fields[6], 1)),
+        kind: String(fields[7] || "time")
+      })
+    } else if (kind === "gpu-memory") {
+      var memoryGpu = gpuSnapshotEntry(snapshot, fields[1])
+      var memoryValue = Math.max(0, number(fields[3]))
+      if (fields[2] === "vram") {
+        memoryGpu.dedicatedMemory += memoryValue
+        memoryGpu.dedicatedMemorySeen = true
+      } else if (fields[2] === "shared") {
+        memoryGpu.sharedMemory += memoryValue
+        memoryGpu.sharedMemorySeen = true
+      }
+    }
+  }
+
+  for (var j = 0; j < snapshot.gpus.length; j++) {
+    var value = snapshot.gpus[j]
+    if (value.memoryUsed < 0 && value.dedicatedMemorySeen) {
+      value.memoryUsed = value.dedicatedMemory
+      value.memoryKind = "vram"
+    } else if (value.memoryUsed < 0 && value.sharedMemorySeen) {
+      value.memoryUsed = value.sharedMemory
+      value.memoryKind = "shared"
+    }
+    if (value.memoryTotal > 0 && value.memoryUsed > value.memoryTotal)
+      value.memoryUsed = value.memoryTotal
+  }
+  return snapshot
+}
+
+function gpuEngineKey(engine) {
+  return String(engine && engine.client || "") + ":"
+    + String(engine && engine.name || "") + ":"
+    + String(engine && engine.kind || "")
+}
+
+function nextGpus(previous, current) {
+  var result = []
+  var previousGpus = previous && Array.isArray(previous.gpus) ? previous.gpus : []
+  var currentGpus = current && Array.isArray(current.gpus) ? current.gpus : []
+  var beforeByGpu = {}
+  var seconds = previous && current && current.sample > previous.sample
+    ? current.sample - previous.sample
+    : 0
+
+  for (var i = 0; i < previousGpus.length; i++) beforeByGpu[previousGpus[i].id] = previousGpus[i]
+
+  for (var j = 0; j < currentGpus.length; j++) {
+    var gpu = currentGpus[j]
+    var usage = number(gpu.directUtilization, -1)
+    if (usage < 0) {
+      var oldGpu = beforeByGpu[gpu.id]
+      var oldEngines = {}
+      var engineUsage = {}
+      var comparable = false
+      var oldValues = oldGpu && Array.isArray(oldGpu.engines) ? oldGpu.engines : []
+      var newValues = Array.isArray(gpu.engines) ? gpu.engines : []
+
+      for (var k = 0; k < oldValues.length; k++) oldEngines[gpuEngineKey(oldValues[k])] = oldValues[k]
+      for (var m = 0; m < newValues.length; m++) {
+        var engine = newValues[m]
+        var oldEngine = oldEngines[gpuEngineKey(engine)]
+        if (!oldEngine) continue
+        var busyDelta = number(engine.busy) - number(oldEngine.busy)
+        if (busyDelta < 0) continue
+        var percent = -1
+        if (engine.kind === "cycles") {
+          var totalDelta = number(engine.total, -1) - number(oldEngine.total, -1)
+          if (totalDelta > 0) percent = busyDelta / totalDelta / engine.capacity * 100
+        } else if (seconds > 0) {
+          percent = busyDelta / (seconds * 1000000000) / engine.capacity * 100
+        }
+        if (!isFinite(percent) || percent < 0) continue
+        comparable = true
+        engineUsage[engine.name] = number(engineUsage[engine.name]) + percent
+      }
+
+      usage = -1
+      if (comparable) {
+        usage = 0
+        // Different engine classes can run in parallel. Their maximum is a
+        // stable whole-GPU indicator without double-counting that overlap.
+        for (var engineName in engineUsage)
+          usage = Math.max(usage, engineUsage[engineName])
+      }
+    }
+
+    result.push({
+      id: gpu.id,
+      vendor: gpu.vendor,
+      driver: gpu.driver,
+      name: gpu.name,
+      usage: usage < 0 ? -1 : clamp(usage, 0, 100),
+      memoryUsed: gpu.memoryUsed,
+      memoryTotal: gpu.memoryTotal,
+      memoryKind: gpu.memoryKind
+    })
+  }
+  return result
 }
 
 function packageEnergyReadable(snapshot) {
@@ -684,15 +847,18 @@ if (typeof module !== "undefined") {
     emptyPackagePowerSnapshot: emptyPackagePowerSnapshot,
     emptyPower: emptyPower,
     emptyStorageSnapshot: emptyStorageSnapshot,
+    emptyGpuSnapshot: emptyGpuSnapshot,
     parseSnapshot: parseSnapshot,
     parseProcessSnapshot: parseProcessSnapshot,
     parseThermalSnapshot: parseThermalSnapshot,
     parsePackagePowerSnapshot: parsePackagePowerSnapshot,
     parseStorageSnapshot: parseStorageSnapshot,
+    parseGpuSnapshot: parseGpuSnapshot,
     packageEnergyReadable: packageEnergyReadable,
     packageCountersComparable: packageCountersComparable,
     packageEnergyDelta: packageEnergyDelta,
     nextPackagePower: nextPackagePower,
+    nextGpus: nextGpus,
     counterPercent: counterPercent,
     counterRate: counterRate,
     memoryPercent: memoryPercent,

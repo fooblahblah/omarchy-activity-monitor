@@ -1,7 +1,7 @@
 # Maintainer: Kristoffer Haugland <stappmus at gmail dot com>
 
 pkgname=omarchy-activity-monitor-power-helper
-pkgver=1.1.4
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Optional root-only RAPL reader for the Omarchy Activity Monitor plugin"
 arch=('any')
@@ -16,9 +16,9 @@ source=(
   'LICENSE'
 )
 sha256sums=(
-  'df140c15d2c35f7aa0fa6b01fe893b66505e11be32af9075c2267a7c303b2957'
+  'a2d5b53cb35c2f22b3f318decd05a020d5430c09f9b76720e2d0f0a06a22d8a5'
   '0d65c92f6ebf96534d885ee4fc4c164dc3bfb0d54db088bbdc77c19ed7d263c8'
-  '5eb2723ce6c3cdd405847894b26b8a135e83f2851dda6dfbf9c58eae08515c03'
+  '8edb97470a6918d4d52e2f7cdf45f33655e72f2004e6a501c6053e78a8cf6c14'
   'dd56ead2d3379b1d8298bbd1b905188b21894c46312ea4186b2afde9b03b3184'
 )
 

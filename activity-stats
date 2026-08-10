@@ -2,7 +2,7 @@
 
 # omarchy:summary=Print system activity stats for the shell
 # omarchy:group=system
-# omarchy:args=[--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-process-power|--activity-process-power-reader|--activity-storage]
+# omarchy:args=[--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-gpus|--activity-process-power|--activity-process-power-reader|--activity-storage]
 
 bar_widget_stats() {
   awk '
@@ -150,6 +150,325 @@ activity_storage_stats() {
   available_bytes=$((block_size * available_blocks))
   printf 'storage\t/\t%s\t%s\t%s\n' \
     "$total_bytes" "$used_bytes" "$available_bytes"
+}
+
+declare -A activity_gpu_name_cache=()
+activity_gpu_name_result=""
+
+activity_trim_field() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value//$'\t'/ }"
+  value="${value//$'\n'/ }"
+  value="${value//$'\r'/ }"
+  printf '%s' "$value"
+}
+
+activity_gpu_vendor_name() {
+  case "${1,,}" in
+    8086) printf 'Intel' ;;
+    1002) printf 'AMD' ;;
+    10de) printf 'NVIDIA' ;;
+    *) printf 'GPU' ;;
+  esac
+}
+
+activity_gpu_name() {
+  local id="$1"
+  local device_path="$2"
+  local vendor_name="$3"
+  local name="" description=""
+
+  if [[ -n ${activity_gpu_name_cache[$id]+cached} ]]; then
+    activity_gpu_name_result="${activity_gpu_name_cache[$id]}"
+    return 0
+  fi
+
+  if [[ -r $device_path/product_name ]]; then
+    read -r name <"$device_path/product_name" 2>/dev/null || name=""
+  fi
+  if [[ -z $name && $id =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[[:xdigit:]]$ ]] &&
+      command -v lspci >/dev/null 2>&1; then
+    description=$(LC_ALL=C lspci -D -s "$id" 2>/dev/null) || description=""
+    description="${description%%$'\n'*}"
+    [[ $description == *": "* ]] && name="${description#*: }"
+    if [[ $name =~ ^(.*)[[:space:]]+\(rev[[:space:]]+[[:xdigit:]]+\)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+    fi
+  fi
+  [[ -n $name ]] || name="$vendor_name GPU"
+  name=$(activity_trim_field "$name")
+  activity_gpu_name_cache["$id"]="$name"
+  activity_gpu_name_result="$name"
+}
+
+activity_gpu_stats() {
+  local proc_path="${OMARCHY_SYSTEM_STATS_PROC_PATH:-/proc}"
+  local sys_path="${OMARCHY_SYSTEM_STATS_SYS_PATH:-/sys}"
+  local sample="0"
+  local card card_name device_path device_real id vendor_hex vendor_name
+  local driver_path driver name value used total kind
+  local has_nvidia=0 nvidia_output bus utilization used_mib total_mib
+  local known_ids fdinfo
+  local -a gpu_order=() fdinfo_files=()
+  local -A gpu_seen=() gpu_vendor=() gpu_driver=() gpu_name=()
+  local -A gpu_utilization=() gpu_memory_used=() gpu_memory_total=()
+  local -A gpu_memory_kind=()
+
+  [[ -r $proc_path/uptime ]] && read -r sample _ <"$proc_path/uptime"
+  printf 'schema\tactivity-gpus\t1\n'
+  printf 'sample\t%s\n' "$sample"
+
+  for card in "$sys_path"/class/drm/card[0-9]*; do
+    card_name="${card##*/}"
+    [[ $card_name =~ ^card[0-9]+$ && -e $card/device ]] || continue
+    device_path="$card/device"
+    device_real=$(readlink -f -- "$device_path" 2>/dev/null) || device_real="$device_path"
+    id="${device_real##*/}"
+    [[ $id =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[[:xdigit:]]$ ]] || id="$card_name"
+    id="${id,,}"
+    [[ -z ${gpu_seen[$id]+seen} ]] || continue
+
+    vendor_hex=""
+    [[ -r $device_path/vendor ]] && read -r vendor_hex <"$device_path/vendor" 2>/dev/null
+    vendor_hex="${vendor_hex#0x}"
+    vendor_hex="${vendor_hex,,}"
+    vendor_name=$(activity_gpu_vendor_name "$vendor_hex")
+
+    driver=""
+    driver_path=$(readlink -f -- "$device_path/driver" 2>/dev/null) || driver_path=""
+    [[ -n $driver_path ]] && driver="${driver_path##*/}"
+    if [[ -z $driver && -r $device_path/uevent ]]; then
+      while IFS='=' read -r value used; do
+        if [[ $value == "DRIVER" ]]; then
+          driver="$used"
+          break
+        fi
+      done <"$device_path/uevent"
+    fi
+    [[ -n $driver ]] || driver="unknown"
+    activity_gpu_name "$id" "$device_path" "$vendor_name"
+    name="$activity_gpu_name_result"
+
+    gpu_seen["$id"]=1
+    gpu_order+=("$id")
+    gpu_vendor["$id"]="$vendor_name"
+    gpu_driver["$id"]="$(activity_trim_field "$driver")"
+    gpu_name["$id"]="$name"
+    gpu_utilization["$id"]="-1"
+    gpu_memory_used["$id"]="-1"
+    gpu_memory_total["$id"]="-1"
+    gpu_memory_kind["$id"]="unknown"
+    [[ $vendor_hex == "10de" ]] && has_nvidia=1
+
+    value=""
+    [[ -r $device_path/gpu_busy_percent ]] &&
+      read -r value <"$device_path/gpu_busy_percent" 2>/dev/null
+    if [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      gpu_utilization["$id"]="$value"
+    fi
+
+    used=""
+    total=""
+    [[ -r $device_path/mem_info_vram_used ]] &&
+      read -r used <"$device_path/mem_info_vram_used" 2>/dev/null
+    [[ -r $device_path/mem_info_vram_total ]] &&
+      read -r total <"$device_path/mem_info_vram_total" 2>/dev/null
+    kind="vram"
+    if [[ ! $used =~ ^[0-9]+$ || ! $total =~ ^[0-9]+$ || $total == 0 ]]; then
+      used=""
+      total=""
+      [[ -r $device_path/mem_info_gtt_used ]] &&
+        read -r used <"$device_path/mem_info_gtt_used" 2>/dev/null
+      [[ -r $device_path/mem_info_gtt_total ]] &&
+        read -r total <"$device_path/mem_info_gtt_total" 2>/dev/null
+      kind="shared"
+    fi
+    if [[ $used =~ ^[0-9]+$ && $total =~ ^[0-9]+$ && $total != 0 ]]; then
+      (( used > total )) && used="$total"
+      gpu_memory_used["$id"]="$used"
+      [[ $kind == "vram" ]] && gpu_memory_total["$id"]="$total"
+      gpu_memory_kind["$id"]="$kind"
+    fi
+  done
+
+  if (( !has_nvidia )); then
+    for card in "$proc_path"/driver/nvidia/gpus/*; do
+      if [[ -d $card ]]; then
+        has_nvidia=1
+        break
+      fi
+    done
+  fi
+
+  # NVIDIA's supported management interface supplies both whole-GPU busy
+  # percentage and framebuffer memory. Query it only when a NVIDIA DRM device
+  # or registered NVIDIA device was found, so systems with an unrelated
+  # nvidia-smi binary stay cheap.
+  if (( has_nvidia )) && command -v nvidia-smi >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      nvidia_output=$(timeout 3 nvidia-smi \
+        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total \
+        --format=csv,noheader,nounits 2>/dev/null) || nvidia_output=""
+    else
+      nvidia_output=$(nvidia-smi \
+        --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total \
+        --format=csv,noheader,nounits 2>/dev/null) || nvidia_output=""
+    fi
+
+    while IFS=',' read -r bus name utilization used_mib total_mib; do
+      bus=$(activity_trim_field "$bus")
+      name=$(activity_trim_field "$name")
+      utilization=$(activity_trim_field "$utilization")
+      used_mib=$(activity_trim_field "$used_mib")
+      total_mib=$(activity_trim_field "$total_mib")
+      bus="${bus,,}"
+      if [[ $bus =~ ^[[:xdigit:]]{8}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[[:xdigit:]]$ ]]; then
+        bus="${bus:4}"
+      fi
+      [[ $bus =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[[:xdigit:]]$ ]] || continue
+      if [[ -z ${gpu_seen[$bus]+seen} ]]; then
+        gpu_seen["$bus"]=1
+        gpu_order+=("$bus")
+      fi
+      gpu_vendor["$bus"]="NVIDIA"
+      gpu_driver["$bus"]="nvidia"
+      [[ -n $name ]] && gpu_name["$bus"]="$name"
+      [[ -n ${gpu_name[$bus]:-} ]] || gpu_name["$bus"]="NVIDIA GPU"
+      if [[ $utilization =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        gpu_utilization["$bus"]="$utilization"
+      fi
+      if [[ $used_mib =~ ^[0-9]+$ && $total_mib =~ ^[0-9]+$ && $total_mib != 0 ]]; then
+        (( used_mib > total_mib )) && used_mib="$total_mib"
+        gpu_memory_used["$bus"]=$((used_mib * 1024 * 1024))
+        gpu_memory_total["$bus"]=$((total_mib * 1024 * 1024))
+        gpu_memory_kind["$bus"]="vram"
+      fi
+    done <<<"$nvidia_output"
+  fi
+
+  for id in "${gpu_order[@]}"; do
+    printf 'gpu\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "${gpu_vendor[$id]:-GPU}" "${gpu_driver[$id]:-unknown}" \
+      "${gpu_name[$id]:-GPU}" "${gpu_utilization[$id]:--1}" \
+      "${gpu_memory_used[$id]:--1}" "${gpu_memory_total[$id]:--1}" \
+      "${gpu_memory_kind[$id]:-unknown}"
+  done
+
+  (( ${#gpu_order[@]} > 0 )) || return 0
+
+  if command -v find >/dev/null 2>&1; then
+    while IFS= read -r fdinfo; do
+      fdinfo="${fdinfo/\/fd\//\/fdinfo\/}"
+      [[ -r $fdinfo ]] && fdinfo_files+=("$fdinfo")
+    done < <(
+      find "$proc_path"/[0-9]*/fd -maxdepth 1 -lname '/dev/dri/*' -print 2>/dev/null
+    )
+  else
+    for fdinfo in "$proc_path"/[0-9]*/fdinfo/[0-9]*; do
+      [[ -r $fdinfo ]] && fdinfo_files+=("$fdinfo")
+    done
+  fi
+  (( ${#fdinfo_files[@]} > 0 )) || return 0
+  known_ids=$(IFS=,; printf '%s' "${gpu_order[*]}")
+
+  # DRM fdinfo is the portable fallback for Intel/Xe and drivers without a
+  # direct utilization file. Duplicate fds expose the same drm-client-id, so
+  # count each client once. Memory rows are instantaneous resident allocation;
+  # engine rows remain raw cumulative counters for delta calculation in QML.
+  printf '%s\n' "${fdinfo_files[@]}" | LC_ALL=C awk -v known_ids="$known_ids" '
+    BEGIN {
+      count = split(known_ids, ids, ",")
+      for (item = 1; item <= count; item++) known[tolower(ids[item])] = 1
+    }
+
+    function byte_value(amount, unit) {
+      if (unit == "KiB") return amount * 1024
+      if (unit == "MiB") return amount * 1024 * 1024
+      if (unit == "GiB") return amount * 1024 * 1024 * 1024
+      return amount
+    }
+
+    function reset_file() {
+      client = ""
+      pdev = ""
+      delete resident
+      delete busy
+      delete total
+      delete capacity
+      delete counter_kind
+    }
+
+    function parse_line(line, fields, key, region, engine) {
+      split(line, fields, /[[:space:]]+/)
+      key = fields[1]
+      sub(/:$/, "", key)
+      if (key == "drm-client-id") client = fields[2]
+      else if (key == "drm-pdev") pdev = tolower(fields[2])
+      else if (key ~ /^drm-resident-/) {
+        region = key
+        sub(/^drm-resident-/, "", region)
+        resident[region] = byte_value(fields[2] + 0, fields[3])
+      } else if (key ~ /^drm-engine-capacity-/) {
+        engine = key
+        sub(/^drm-engine-capacity-/, "", engine)
+        capacity[engine] = fields[2] + 0
+      } else if (key ~ /^drm-total-cycles-/) {
+        engine = key
+        sub(/^drm-total-cycles-/, "", engine)
+        total[engine] = fields[2] + 0
+      } else if (key ~ /^drm-cycles-/) {
+        engine = key
+        sub(/^drm-cycles-/, "", engine)
+        busy[engine] = fields[2] + 0
+        counter_kind[engine] = "cycles"
+      } else if (key ~ /^drm-engine-/) {
+        engine = key
+        sub(/^drm-engine-/, "", engine)
+        busy[engine] = byte_value(fields[2] + 0, fields[3])
+        counter_kind[engine] = "time"
+      }
+    }
+
+    function finish_file(client_key, region, engine) {
+      client_key = pdev SUBSEP client
+      if (!(pdev in known) || client == "" || (client_key in seen_client)) return
+      seen_client[client_key] = 1
+
+      for (region in resident) {
+        if (region ~ /(vram|local)/) {
+          dedicated_memory[pdev] += resident[region]
+          dedicated_seen[pdev] = 1
+        } else {
+          shared_memory[pdev] += resident[region]
+          shared_seen[pdev] = 1
+        }
+      }
+      for (engine in busy) {
+        if (counter_kind[engine] == "cycles" && !(engine in total)) continue
+        printf "engine\t%s\t%s\t%s\t%.0f\t%.0f\t%.0f\t%s\n", \
+          pdev, client, engine, busy[engine], \
+          (counter_kind[engine] == "cycles" ? total[engine] : -1), \
+          (capacity[engine] > 0 ? capacity[engine] : 1), counter_kind[engine]
+      }
+    }
+
+    {
+      path = $0
+      reset_file()
+      while ((getline line < path) > 0) parse_line(line)
+      close(path)
+      finish_file()
+    }
+
+    END {
+      for (pdev in dedicated_seen)
+        printf "gpu-memory\t%s\tvram\t%.0f\n", pdev, dedicated_memory[pdev]
+      for (pdev in shared_seen)
+        printf "gpu-memory\t%s\tshared\t%.0f\n", pdev, shared_memory[pdev]
+    }
+  '
 }
 
 activity_process_power_stats() {
@@ -423,6 +742,9 @@ activity_reader() {
       thermals)
         activity_thermal_stats
         ;;
+      gpus)
+        activity_gpu_stats
+        ;;
       storage)
         activity_storage_stats
         ;;
@@ -469,6 +791,10 @@ case "${1:-}" in
     activity_thermal_stats
     exit
     ;;
+  --activity-gpus)
+    activity_gpu_stats
+    exit
+    ;;
   --activity-process-power)
     activity_process_power_stats
     exit
@@ -482,7 +808,7 @@ case "${1:-}" in
     exit
     ;;
   *)
-    echo "Usage: activity-stats [--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-process-power|--activity-process-power-reader|--activity-storage]" >&2
+    echo "Usage: activity-stats [--bar-widget|--activity-reader|--activity-resources|--activity-processes|--activity-thermals|--activity-gpus|--activity-process-power|--activity-process-power-reader|--activity-storage]" >&2
     exit 1
     ;;
 esac
