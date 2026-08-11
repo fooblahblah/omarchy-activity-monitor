@@ -845,6 +845,46 @@ function formatDuration(value) {
   return minutes + "m"
 }
 
+function samplingProfile(value) {
+  var name = String(value || "balanced").trim().toLowerCase()
+  if (name === "efficient") {
+    return {
+      name: "Efficient",
+      resources: 3000,
+      processes: 6000,
+      thermals: 15000,
+      gpus: 4000,
+      storage: 60000
+    }
+  }
+  if (name === "fast" || name === "responsive") {
+    return {
+      name: "Fast",
+      resources: 750,
+      processes: 1500,
+      thermals: 5000,
+      gpus: 1000,
+      storage: 15000
+    }
+  }
+  return {
+    name: "Balanced",
+    resources: 1500,
+    processes: 3000,
+    thermals: 10000,
+    gpus: 2000,
+    storage: 30000
+  }
+}
+
+function formatTemperature(value, unit) {
+  var celsius = Number(value)
+  if (!isFinite(celsius)) return "—"
+  var fahrenheit = String(unit || "Celsius").toLowerCase() === "fahrenheit"
+  var displayed = fahrenheit ? celsius * 9 / 5 + 32 : celsius
+  return Math.round(displayed) + (fahrenheit ? "°F" : "°C")
+}
+
 function temperatureRank(temperature) {
   var chip = String(temperature && temperature.chip || "").toLowerCase()
   var label = String(temperature && temperature.label || "").toLowerCase()
@@ -911,6 +951,8 @@ if (typeof module !== "undefined") {
     filterAndSortProcesses: filterAndSortProcesses,
     formatBytes: formatBytes,
     formatDuration: formatDuration,
+    samplingProfile: samplingProfile,
+    formatTemperature: formatTemperature,
     cpuTemperature: cpuTemperature
   }
 }

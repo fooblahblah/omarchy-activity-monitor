@@ -15,6 +15,7 @@ Item {
   property var settings: ({})
   property bool active: false
   property bool expanded: false
+  property bool processPowerEnabled: true
 
   readonly property string statsHelperPath: decodeURIComponent(
     String(Qt.resolvedUrl("activity-sampler")).replace("file://", ""))
@@ -41,11 +42,13 @@ Item {
   readonly property string powerStateReadyRoot: "ready-root"
   readonly property string powerStateUnavailable: "unavailable"
 
-  readonly property int refreshInterval: boundedSetting("refreshIntervalMs", 1500, 500, 10000)
-  readonly property int processRefreshInterval: boundedSetting("processRefreshIntervalMs", 3000, 1000, 15000)
-  readonly property int thermalRefreshInterval: boundedSetting("thermalRefreshIntervalMs", 10000, 3000, 60000)
-  readonly property int gpuRefreshInterval: boundedSetting("gpuRefreshIntervalMs", 2000, 1000, 15000)
-  readonly property int storageRefreshInterval: boundedSetting("storageRefreshIntervalMs", 30000, 10000, 120000)
+  readonly property bool samplingProfileConfigured: String(setting("samplingSpeed", "")).trim() !== ""
+  readonly property var samplingProfile: Model.samplingProfile(setting("samplingSpeed", "Balanced"))
+  readonly property int refreshInterval: intervalSetting("refreshIntervalMs", 1500, 500, 10000, samplingProfile.resources)
+  readonly property int processRefreshInterval: intervalSetting("processRefreshIntervalMs", 3000, 1000, 15000, samplingProfile.processes)
+  readonly property int thermalRefreshInterval: intervalSetting("thermalRefreshIntervalMs", 10000, 3000, 60000, samplingProfile.thermals)
+  readonly property int gpuRefreshInterval: intervalSetting("gpuRefreshIntervalMs", 2000, 1000, 15000, samplingProfile.gpus)
+  readonly property int storageRefreshInterval: intervalSetting("storageRefreshIntervalMs", 30000, 10000, 120000, samplingProfile.storage)
   readonly property int historySamples: boundedSetting("historySamples", 60, 20, 240)
 
   property var _snapshot: Model.emptySnapshot()
@@ -90,6 +93,12 @@ Item {
     var value = Number(setting(name, fallback))
     if (!isFinite(value)) value = fallback
     return Math.max(minimum, Math.min(maximum, value))
+  }
+
+  function intervalSetting(name, fallback, minimum, maximum, profileValue) {
+    if (samplingProfileConfigured)
+      return Math.max(minimum, Math.min(maximum, Number(profileValue) || fallback))
+    return boundedSetting(name, fallback, minimum, maximum)
   }
 
   function nextDeadline(previous, interval, now) {
@@ -255,7 +264,8 @@ Item {
   }
 
   function startProcessPowerReader() {
-    if (!active || !expanded || processPowerUnavailable || processPowerProc.running) return
+    if (!active || !expanded || !processPowerEnabled
+        || processPowerUnavailable || processPowerProc.running) return
 
     var useRoot = _processPowerState === powerStateSwitchingRoot
     _processPowerBuffer = []
@@ -267,7 +277,8 @@ Item {
   }
 
   function requestProcessPowerSample() {
-    if (!active || !expanded || processPowerUnavailable || _processPowerSamplePending) return
+    if (!active || !expanded || !processPowerEnabled
+        || processPowerUnavailable || _processPowerSamplePending) return
     _processPowerSamplePending = true
     processPowerWatchdog.restart()
     if (!processPowerProc.running) startProcessPowerReader()
@@ -297,7 +308,7 @@ Item {
   }
 
   function refreshProcessCycle() {
-    if (expanded && !processPowerUnavailable) requestProcessPowerSample()
+    if (expanded && processPowerEnabled && !processPowerUnavailable) requestProcessPowerSample()
     else refreshProcesses()
   }
 
@@ -353,7 +364,7 @@ Item {
   }
 
   function consumeProcessPower(raw) {
-    if (!expanded) return
+    if (!expanded || !processPowerEnabled) return
     var next = Model.parsePackagePowerSnapshot(raw)
     if (next.schema !== 1 || next.sample <= 0 || !Model.packageEnergyReadable(next)) {
       rejectProcessPowerSample()
@@ -460,12 +471,24 @@ Item {
       _gpuDue = 0
       scheduleNextDeadline()
     } else if (active) {
-      _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
+      if (processPowerEnabled)
+        _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
       _previousGpuSnapshot = Model.emptyGpuSnapshot()
       refreshProcessCycle()
       refreshGpus()
       _gpuDue = Date.now() + gpuRefreshInterval
       scheduleNextDeadline()
+    }
+  }
+
+  onProcessPowerEnabledChanged: {
+    if (!processPowerEnabled) {
+      stopProcessPowerReader()
+      resetProcessPowerMeasurement()
+      if (active) refreshProcesses()
+    } else if (active && expanded) {
+      _previousProcessPowerSnapshot = Model.emptyPackagePowerSnapshot()
+      refreshProcessCycle()
     }
   }
 
@@ -499,7 +522,7 @@ Item {
       onRead: function(line) { root.consumeProcessPowerLine(line) }
     }
     onStarted: {
-      if (!root.active || !root.expanded) {
+      if (!root.active || !root.expanded || !root.processPowerEnabled) {
         root.stopProcessPowerReader()
         return
       }
@@ -519,7 +542,7 @@ Item {
       root._processPowerBuffer = []
       processPowerWatchdog.stop()
 
-      if (!root.active || !root.expanded) {
+      if (!root.active || !root.expanded || !root.processPowerEnabled) {
         root._processPowerState = root.powerStateStopped
         return
       }
@@ -575,7 +598,8 @@ Item {
     id: powerWarmup
     interval: 300
     repeat: false
-    onTriggered: if (root.active && root.expanded) root.requestProcessPowerSample()
+    onTriggered: if (root.active && root.expanded && root.processPowerEnabled)
+      root.requestProcessPowerSample()
   }
 
   Timer {

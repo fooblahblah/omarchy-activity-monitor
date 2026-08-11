@@ -22,10 +22,11 @@ omarchy plugin disable stappmus.activity-monitor
 The compact panel shows CPU, memory, network and disk activity plus the three
 busiest processes. CPU and RAM card headings include the current average CPU
 clock and configured DDR transfer rate. Expand it with the button or `e` for
-per-core activity, memory, reclaimable cache and swap details, disk storage
-used and remaining, GPU utilization, graphics clock and memory, search,
-process sorting, estimated CPU-package watts, and a larger process list. Your
-own apps can be asked to close from the expanded view after a confirmation.
+per-core activity, memory and reclaimable cache, a swap badge in the disk
+activity card, disk storage used and remaining, GPU utilization, graphics
+clock and memory, search, process sorting, estimated CPU-package watts, and a
+larger process list. Your own apps can be asked to close from the expanded
+view after a confirmation.
 
 CPU and GPU clocks are shown in MHz. DDR memory is shown in MT/s because DDR
 transfers data twice per clock cycle; its marketed speed is a transfer rate,
@@ -37,6 +38,14 @@ Linux's available-memory accounting: `(MemTotal - MemAvailable) / MemTotal`.
 Cache is `Cached + SReclaimable`, matching `free`'s cache column. Linux can
 reuse that cache automatically when applications need RAM, so it is not an
 extra amount to add to used memory.
+
+The gear button (or `s`) opens settings inside the panel. Preferences are
+applied immediately and saved with the bar layout: update speed, graph history,
+Celsius or Fahrenheit, hardware-speed labels, the default compact/detailed
+view, and per-process power estimation. `Efficient`, `Balanced`, and `Fast`
+sample core resources every 3 seconds, 1.5 seconds, and 0.75 seconds
+respectively; slower-changing process, GPU, thermal, and storage readings use
+proportionate cadences.
 
 The `GPU` square lists up to two adapters separately. NVIDIA and discrete AMD
 cards show used/total VRAM when their drivers expose it. Integrated GPUs show
@@ -59,6 +68,7 @@ Keyboard shortcuts in the expanded view:
   PID, runtime, or name
 - `h` / `l`: cycle sort columns
 - `r`: refresh
+- `s`: open settings
 - `x`: confirm closing the explicitly selected app
 - `e` or `Esc`: collapse
 
@@ -66,10 +76,11 @@ The widget keeps one stdin-driven native stats reader alive only while its
 panel is open. Resource, process, temperature, GPU, and storage requests retain
 their independent refresh cadences without repeatedly launching collectors.
 One single-shot deadline scheduler coalesces due work instead of maintaining a
-recurring UI timer per metric. GPU and energy sampling run only while the
-advanced view is expanded. Closing the panel stops all readers but retains the
-last valid display values; reopening shows those immediately while fresh
-counter baselines are collected over 300 ms.
+recurring UI timer per metric. GPU sampling runs only while the advanced view
+is expanded, and energy sampling additionally respects its settings toggle.
+Closing the panel stops all readers but retains the last valid display values;
+reopening shows those immediately while fresh counter baselines are collected
+over 300 ms.
 
 The native reader accesses procfs and sysfs directly and launches no child
 collectors. It caches static CPU, disk, thermal, GPU, user, and process identity
@@ -86,8 +97,8 @@ and protected processes, and never invoke a shell or privilege prompt. The
 confirmation discloses that an app still running after a three-second graceful
 close window will be force-closed.
 
-`EST. W` is an interval estimate (three seconds by default): measured RAPL CPU
-package energy is assigned by each process's CPU-time share. It is
+`EST. W` is an interval estimate (three seconds in Balanced mode): measured
+RAPL CPU package energy is assigned by each process's CPU-time share. It is
 intentionally marked with `~` because Linux exposes energy for hardware
 domains, not individual processes. Package coverage is processor-specific and
 can include cores, uncore, integrated graphics, and on-chip interfaces; it does
@@ -96,7 +107,8 @@ runs only while the advanced view is expanded. The plugin reads RAPL directly
 when the kernel exposes it to the user. On systems where RAPL is root-only, an
 optional root-owned companion helper may be installed; the plugin never opens
 a privilege prompt while sampling. Unsupported hardware or an unavailable
-reader shows `—`.
+reader shows `—`. Turning off process power estimates removes the column and
+stops the energy reader entirely.
 
 ### Optional root-only RAPL reader
 

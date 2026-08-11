@@ -157,6 +157,19 @@ assertEqual(
 assertEqual(activity.formatBytes(1536, '/s'), '1.50 KiB/s', 'activity formats byte rates')
 assertEqual(activity.formatDuration(42), '42s', 'activity formats short process runtimes')
 assertEqual(activity.formatDuration(90061), '1d 1h', 'activity formats long durations')
+assertEqual(activity.samplingProfile('Efficient').resources, 3000, 'activity offers a low-overhead sampling profile')
+assertEqual(activity.samplingProfile('Balanced').processes, 3000, 'activity keeps the balanced process cadence')
+assertEqual(activity.samplingProfile('Fast').resources, 750, 'activity offers a responsive sampling profile')
+assertEqual(activity.samplingProfile('unknown').name, 'Balanced', 'activity safely defaults unknown sampling profiles')
+assertEqual(activity.formatTemperature(20, 'Celsius'), '20°C', 'activity formats Celsius temperatures')
+assertEqual(activity.formatTemperature(20, 'Fahrenheit'), '68°F', 'activity converts temperatures to Fahrenheit')
+const manifest = requireFromRoot('manifest.json')
+const settingKeys = manifest.barWidget.schema.map(entry => entry.key)
+assertDeepEqual(
+  settingKeys,
+  ['samplingSpeed', 'historySamples', 'temperatureUnit', 'showFrequencies', 'openExpanded', 'processPowerEnabled'],
+  'activity publishes the same focused preferences offered by its settings menu'
+)
 JS
 
 snapshot=$("$ROOT/activity-stats" --activity-resources)
@@ -183,7 +196,7 @@ grep -Eq '^process[[:space:]]' <<<"$process_snapshot" || fail "activity process 
 pass "activity collector emits the process snapshot contract"
 
 [[ -x $ROOT/activity-sampler ]] || fail "native activity sampler is executable"
-[[ $("$ROOT/activity-sampler" --version) == "activity-sampler 2.0.0" ]] ||
+[[ $("$ROOT/activity-sampler" --version) == "activity-sampler 2.1.0" ]] ||
   fail "native activity sampler reports the release protocol version"
 [[ ! -e $ROOT/activity-process-stats ]] ||
   fail "legacy process helper remains beside the unified native sampler"
@@ -338,7 +351,8 @@ grep -Fq 'String(Qt.resolvedUrl("activity-sampler"))' "$controller_file" ||
   fail "activity panel does not launch the native sampler directly"
 grep -Fq '? [powerHelperPath]' "$controller_file" ||
   fail "activity panel does not use the persistent guarded CPU-energy reader"
-grep -Fq 'if (!active || !expanded || processPowerUnavailable || _processPowerSamplePending) return' "$controller_file" ||
+grep -Fq 'if (!active || !expanded || !processPowerEnabled' "$controller_file" &&
+  grep -Fq '|| processPowerUnavailable || _processPowerSamplePending) return' "$controller_file" ||
   fail "activity panel samples process power outside the advanced view"
 grep -Fq 'onExpandedChanged:' "$controller_file" &&
   grep -Fq 'resetProcessPowerMeasurement()' "$controller_file" ||
@@ -393,7 +407,7 @@ grep -Fq 'return "~" + watts.toFixed' "$panel_file" ||
   fail "activity process watts are not visibly marked as estimates"
 grep -Fq 'root.setSort("power")' "$panel_file" ||
   fail "activity process power cannot be sorted"
-grep -Fq 'if (nextKey === "power" && !processPower.available) return' "$panel_file" ||
+grep -Fq 'if (nextKey === "power" && (!powerEstimatesEnabled || !processPower.available)) return' "$panel_file" ||
   fail "activity process power sorting remains active without a measurement"
 grep -Fq 'showProcessUserColumn' "$panel_file" &&
   grep -Fq 'showProcessTimeColumn' "$panel_file" ||
@@ -418,6 +432,23 @@ grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
   fail "activity system details do not retain total RAM"
 grep -Fq 'label: "CORES"' "$panel_file" ||
   fail "activity system details lose the logical core count"
+grep -Fq 'badge: root.swapBadgeText()' "$panel_file" &&
+  grep -Fq 'return snapshot.memory.swapTotal ? "SWAP " + percentText(metrics.swap) : "NO SWAP"' "$panel_file" ||
+  fail "activity disk card does not expose swap usage"
+if grep -Fq 'label: "SWAP"' "$panel_file"; then
+  fail "activity system details still contain the displaced swap reading"
+fi
+grep -Fq 'id: settingsContent' "$panel_file" &&
+  grep -Fq 'label: "Update speed"' "$panel_file" &&
+  grep -Fq 'label: "Graph history"' "$panel_file" &&
+  grep -Fq 'label: "Temperature"' "$panel_file" &&
+  grep -Fq 'function persistSettings(values)' "$panel_file" &&
+  grep -Fq 'root.bar.shell.updateEntryInline(root.moduleName, entry)' "$panel_file" ||
+  fail "activity panel does not expose persistent personalization controls"
+grep -Fq 'processPowerEnabled: root.powerEstimatesEnabled' "$panel_file" &&
+  grep -Fq 'onProcessPowerEnabledChanged:' "$controller_file" &&
+  grep -Fq 'visible: !compact && root.powerEstimatesEnabled' "$panel_file" ||
+  fail "activity power preference does not stop sampling and simplify the process table"
 if grep -Fq 'text: "POWER"' "$panel_file"; then
   fail "activity presents estimated per-process power as an exact measurement"
 fi
@@ -436,11 +467,11 @@ grep -Fq 'ConfirmDialog {' "$panel_file" ||
   fail "activity process actions are not confirmed"
 grep -Fq 'processConfirm.selectedIndex = 0' "$panel_file" ||
   fail "activity process confirmation does not default to Cancel"
-grep -Fq 'if (!processActions.confirmationOpen && root.cursorActive)' "$panel_file" ||
+grep -Fq 'if (!root.settingsOpen && !processActions.confirmationOpen && root.cursorActive)' "$panel_file" ||
   fail "activity process shortcut can act without an explicit selection"
 grep -Fq 'ProcessActionController {' "$panel_file" &&
   grep -Fq 'active: root.opened' "$panel_file" &&
-  grep -Fq 'enabled: root.expanded' "$panel_file" ||
+  grep -Fq 'enabled: root.expanded && !root.settingsOpen' "$panel_file" ||
   fail "activity panel does not delegate guarded app actions to their controller"
 grep -Fq 'Model.processIdentityKey' "$panel_file" ||
   fail "activity process selection is not tied to its sampled start time"

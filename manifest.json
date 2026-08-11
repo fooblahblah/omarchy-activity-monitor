@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "stappmus.activity-monitor",
   "name": "Activity Monitor",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "Kristoffer Haugland",
   "license": "MIT",
   "description": "Native low-overhead CPU, RAM, GPU, storage, process, and estimated CPU-package power monitoring",
@@ -24,58 +24,21 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalMs": 1500,
-      "processRefreshIntervalMs": 3000,
-      "thermalRefreshIntervalMs": 10000,
-      "gpuRefreshIntervalMs": 2000,
-      "storageRefreshIntervalMs": 30000,
-      "historySamples": 60
+      "samplingSpeed": "Balanced",
+      "historySamples": 60,
+      "temperatureUnit": "Celsius",
+      "showFrequencies": true,
+      "openExpanded": false,
+      "processPowerEnabled": true
     },
     "schema": [
       {
-        "key": "refreshIntervalMs",
-        "type": "integer",
-        "label": "Refresh interval (milliseconds)",
-        "min": 500,
-        "max": 10000,
-        "step": 250,
-        "defaultValue": 1500
-      },
-      {
-        "key": "processRefreshIntervalMs",
-        "type": "integer",
-        "label": "Process refresh interval (milliseconds)",
-        "min": 1000,
-        "max": 15000,
-        "step": 500,
-        "defaultValue": 3000
-      },
-      {
-        "key": "thermalRefreshIntervalMs",
-        "type": "integer",
-        "label": "Thermal refresh interval (milliseconds)",
-        "min": 3000,
-        "max": 60000,
-        "step": 1000,
-        "defaultValue": 10000
-      },
-      {
-        "key": "gpuRefreshIntervalMs",
-        "type": "integer",
-        "label": "GPU refresh interval (milliseconds)",
-        "min": 1000,
-        "max": 15000,
-        "step": 500,
-        "defaultValue": 2000
-      },
-      {
-        "key": "storageRefreshIntervalMs",
-        "type": "integer",
-        "label": "Storage refresh interval (milliseconds)",
-        "min": 10000,
-        "max": 120000,
-        "step": 5000,
-        "defaultValue": 30000
+        "key": "samplingSpeed",
+        "type": "enum",
+        "label": "Update speed",
+        "options": ["Efficient", "Balanced", "Fast"],
+        "defaultValue": "Balanced",
+        "description": "Efficient uses fewer samples; Fast makes the graphs react sooner."
       },
       {
         "key": "historySamples",
@@ -85,6 +48,32 @@
         "max": 240,
         "step": 10,
         "defaultValue": 60
+      },
+      {
+        "key": "temperatureUnit",
+        "type": "enum",
+        "label": "Temperature unit",
+        "options": ["Celsius", "Fahrenheit"],
+        "defaultValue": "Celsius"
+      },
+      {
+        "key": "showFrequencies",
+        "type": "boolean",
+        "label": "Show hardware speeds",
+        "defaultValue": true
+      },
+      {
+        "key": "openExpanded",
+        "type": "boolean",
+        "label": "Open detailed view",
+        "defaultValue": false
+      },
+      {
+        "key": "processPowerEnabled",
+        "type": "boolean",
+        "label": "Process power estimates",
+        "defaultValue": true,
+        "description": "Disable to skip CPU package-energy sampling in the detailed view."
       }
     ]
   }

@@ -14,6 +14,8 @@ Panel {
   implicitHeight: button.implicitHeight
 
   property bool expanded: false
+  property bool settingsOpen: false
+  property bool settingsControlActive: false
   property bool cursorActive: false
   property int selectedProcessIndex: 0
   property string selectedProcessKey: ""
@@ -42,11 +44,13 @@ Panel {
   readonly property int processMetricColumnWidth: Style.space(66)
   readonly property bool showProcessUserColumn: panel.contentWidth >= Style.space(650)
   readonly property bool showProcessTimeColumn: panel.contentWidth >= Style.space(560)
-  readonly property string processPowerTooltip: processPowerUnavailable
-    ? "CPU package energy is unavailable on this system"
+  readonly property string processPowerTooltip: !powerEstimatesEnabled
+    ? "Process power estimates are disabled in Activity settings"
+    : (processPowerUnavailable
+      ? "CPU package energy is unavailable on this system"
     : (processPower.available
         ? "Estimated CPU-time share of measured CPU package power"
-        : "Measuring CPU package energy…")
+        : "Measuring CPU package energy…"))
   readonly property var cpuTemperature: Model.cpuTemperature(activity.thermalSnapshot.temperatures)
   readonly property real storageUsedFraction: storageSnapshot.total > 0
     ? Math.max(0, Math.min(1, storageSnapshot.used / storageSnapshot.total))
@@ -61,6 +65,13 @@ Panel {
     ? sortedProcesses[Math.max(0, Math.min(selectedProcessIndex, sortedProcesses.length - 1))]
     : null
   readonly property var gpuDetailItems: buildGpuDetailItems()
+  readonly property string samplingSpeedSetting: normalizedSamplingSpeed(setting("samplingSpeed", "Balanced"))
+  readonly property int historySamplesSetting: Math.max(20, Math.min(240,
+    Math.round(Number(setting("historySamples", 60)) || 60)))
+  readonly property string temperatureUnitSetting: normalizedTemperatureUnit(setting("temperatureUnit", "Celsius"))
+  readonly property bool showFrequencies: booleanSetting("showFrequencies", true)
+  readonly property bool openExpandedByDefault: booleanSetting("openExpanded", false)
+  readonly property bool powerEstimatesEnabled: booleanSetting("processPowerEnabled", true)
 
   function refresh() {
     activity.refresh()
@@ -80,6 +91,16 @@ Panel {
     Qt.callLater(function() {
       if (root.opened && keyCatcher) keyCatcher.forceActiveFocus()
     })
+  }
+
+  function setSettingsOpen(value) {
+    settingsOpen = value
+    settingsControlActive = value
+    if (!value) {
+      Qt.callLater(function() {
+        if (root.opened && keyCatcher) keyCatcher.forceActiveFocus()
+      })
+    }
   }
 
   function clampProcessCursor() {
@@ -126,7 +147,7 @@ Panel {
   }
 
   function setSort(nextKey) {
-    if (nextKey === "power" && !processPower.available) return
+    if (nextKey === "power" && (!powerEstimatesEnabled || !processPower.available)) return
     if (sortKey === nextKey) sortAscending = !sortAscending
     else {
       sortKey = nextKey
@@ -135,7 +156,7 @@ Panel {
   }
 
   function cycleSort(delta) {
-    var keys = processPower.available
+    var keys = powerEstimatesEnabled && processPower.available
       ? ["cpu", "memory", "power", "pid", "runtime", "name"]
       : ["cpu", "memory", "pid", "runtime", "name"]
     var index = keys.indexOf(sortKey)
@@ -159,6 +180,61 @@ Panel {
     return Math.round(Number(value) || 0) + "%"
   }
 
+  function booleanSetting(name, fallback) {
+    var value = setting(name, fallback)
+    if (typeof value === "boolean") return value
+    if (typeof value === "string") {
+      var normalized = value.trim().toLowerCase()
+      if (normalized === "true" || normalized === "on" || normalized === "yes") return true
+      if (normalized === "false" || normalized === "off" || normalized === "no") return false
+    }
+    return value === undefined || value === null ? fallback : !!value
+  }
+
+  function normalizedSamplingSpeed(value) {
+    return Model.samplingProfile(value).name
+  }
+
+  function normalizedTemperatureUnit(value) {
+    return String(value || "Celsius").toLowerCase() === "fahrenheit"
+      ? "Fahrenheit"
+      : "Celsius"
+  }
+
+  function persistSettings(values) {
+    var entry = { id: root.moduleName }
+    var current = root.settings || ({})
+    for (var existing in current) if (existing !== "id") entry[existing] = current[existing]
+    for (var key in values) entry[key] = values[key]
+    if (values.samplingSpeed !== undefined) {
+      delete entry.refreshIntervalMs
+      delete entry.processRefreshIntervalMs
+      delete entry.thermalRefreshIntervalMs
+      delete entry.gpuRefreshIntervalMs
+      delete entry.storageRefreshIntervalMs
+    }
+
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function resetPreferences() {
+    persistSettings({
+      samplingSpeed: "Balanced",
+      historySamples: 60,
+      temperatureUnit: "Celsius",
+      showFrequencies: true,
+      openExpanded: false,
+      processPowerEnabled: true
+    })
+  }
+
+  function swapBadgeText() {
+    if (!hasSnapshot) return "SWAP —"
+    return snapshot.memory.swapTotal ? "SWAP " + percentText(metrics.swap) : "NO SWAP"
+  }
+
   function memoryBreakdownText() {
     if (!snapshot.memory.total) return "USED — · CACHE —"
     var usedText = Model.formatBytes(snapshot.memory.total - snapshot.memory.available)
@@ -172,6 +248,7 @@ Panel {
   }
 
   function frequencyText(value, unit) {
+    if (!showFrequencies) return ""
     var frequency = Number(value)
     if (!isFinite(frequency) || frequency < 0) return ""
     return Math.round(frequency) + " " + unit
@@ -270,10 +347,6 @@ Panel {
         value: snapshot.memory.total ? Model.formatBytes(snapshot.memory.total) : "—"
       },
       {
-        label: "SWAP",
-        value: snapshot.memory.swapTotal ? percentText(metrics.swap) : "NONE"
-      },
-      {
         label: "CORES",
         value: snapshot.cores.length ? snapshot.cores.length + " LOGICAL" : "—"
       },
@@ -323,8 +396,9 @@ Panel {
   }
 
   function processNameColumnWidth(availableWidth, spacing) {
-    var fixedWidth = processPidColumnWidth + processMetricColumnWidth * 3
-    var gaps = 4
+    var fixedWidth = processPidColumnWidth
+      + processMetricColumnWidth * (powerEstimatesEnabled ? 3 : 2)
+    var gaps = powerEstimatesEnabled ? 4 : 3
     if (showProcessUserColumn) {
       fixedWidth += processUserColumnWidth
       gaps++
@@ -348,15 +422,26 @@ Panel {
     }
   }
 
+  onPowerEstimatesEnabledChanged: {
+    if (!powerEstimatesEnabled && sortKey === "power") {
+      sortKey = "cpu"
+      sortAscending = false
+    }
+  }
+
   onOpenedChanged: {
     if (opened) {
-      expanded = false
+      expanded = openExpandedByDefault
+      settingsOpen = false
+      settingsControlActive = false
       cursorActive = false
       selectedProcessIndex = 0
       selectedProcessKey = ""
       processQuery = ""
     } else {
       expanded = false
+      settingsOpen = false
+      settingsControlActive = false
       processQuery = ""
     }
   }
@@ -366,12 +451,13 @@ Panel {
     settings: root.settings
     active: root.opened
     expanded: root.expanded
+    processPowerEnabled: root.powerEstimatesEnabled
   }
 
   ProcessActionController {
     id: processActions
     active: root.opened
-    enabled: root.expanded
+    enabled: root.expanded && !root.settingsOpen
     onConfirmationRequested: processConfirm.selectedIndex = 0
     onFocusRequested: if (root.opened) keyCatcher.forceActiveFocus()
     onRefreshRequested: activity.refreshProcessCycle()
@@ -402,22 +488,24 @@ Panel {
     // layout reaches a screen edge, KeyboardPanel grows it inward instead of
     // moving the card to the center of the display.
     centerOnBar: false
-    contentWidth: panel.fittedContentWidth(root.expanded ? Style.space(780) : Style.space(380))
+    contentWidth: panel.fittedContentWidth(root.settingsOpen
+      ? Style.space(600)
+      : (root.expanded ? Style.space(780) : Style.space(380)))
     contentHeight: panel.fittedContentHeight(
       contentLoader.item ? contentLoader.item.implicitHeight : Style.space(320),
-      root.expanded ? Style.space(720) : Style.space(560))
+      root.expanded || root.settingsOpen ? Style.space(720) : Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: !!(root.searchField && root.searchField.activeFocus)
+      blocked: !!(root.searchField && root.searchField.activeFocus) || root.settingsControlActive
 
       onMoveRequested: function(dx, dy) {
         if (processActions.confirmationOpen) {
           if (dx !== 0) processConfirm.selectedIndex = processConfirm.selectedIndex === 0 ? 1 : 0
           return
         }
-        if (!root.expanded) return
+        if (!root.expanded || root.settingsOpen) return
         if (dy !== 0) root.moveProcess(dy)
         else if (dx !== 0) root.cycleSort(dx)
       }
@@ -427,18 +515,19 @@ Panel {
           else processActions.confirm()
           return
         }
-        if (!root.expanded) root.setExpanded(true)
+        if (!root.expanded && !root.settingsOpen) root.setExpanded(true)
       }
       onCloseRequested: {
         if (processActions.confirmationOpen) {
           processActions.cancel()
           return
         }
-        if (root.expanded) root.setExpanded(false)
+        if (root.settingsOpen) root.setSettingsOpen(false)
+        else if (root.expanded) root.setExpanded(false)
         else root.close()
       }
       onDeleteRequested: {
-        if (!processActions.confirmationOpen && root.cursorActive)
+        if (!root.settingsOpen && !processActions.confirmationOpen && root.cursorActive)
           processActions.request(root.selectedProcess)
       }
       onTabRequested: function(direction) {
@@ -451,7 +540,9 @@ Panel {
       onTextKey: function(text) {
         if (processActions.confirmationOpen) return
         var key = String(text || "").toLowerCase()
-        if (key === "e") root.setExpanded(!root.expanded)
+        if (key === "s") root.setSettingsOpen(!root.settingsOpen)
+        else if (root.settingsOpen) return
+        else if (key === "e") root.setExpanded(!root.expanded)
         else if (key === "r") root.refresh()
         else if (key === "/" && root.expanded) root.focusSearch()
         else if (key === "c" && root.expanded) root.setSort("cpu")
@@ -465,7 +556,9 @@ Panel {
       Loader {
         id: contentLoader
         width: parent.width
-        sourceComponent: root.expanded ? expandedContent : compactContent
+        sourceComponent: root.settingsOpen
+          ? settingsContent
+          : (root.expanded ? expandedContent : compactContent)
       }
 
       ConfirmDialog {
@@ -609,6 +702,184 @@ Panel {
   }
 
   Component {
+    id: settingsContent
+
+    Column {
+      id: settingsPage
+
+      width: contentLoader.width
+      spacing: Style.spacing.panelGap
+
+      Keys.priority: Keys.AfterItem
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Escape || String(event.text || "").toLowerCase() === "s") {
+          root.setSettingsOpen(false)
+          event.accepted = true
+        }
+      }
+      Component.onCompleted: Qt.callLater(function() { updateSpeedDropdown.forceActiveFocus() })
+      Component.onDestruction: root.settingsControlActive = false
+
+      ActivityHeader {
+        width: parent.width
+        expanded: root.expanded
+      }
+
+      DetailSurface {
+        width: parent.width
+        height: settingsBody.implicitHeight + Style.spacing.xl * 2
+
+        Column {
+          id: settingsBody
+          x: Style.spacing.xl
+          y: Style.spacing.xl
+          width: Math.max(1, parent.width - Style.spacing.xl * 2)
+          spacing: Style.spacing.md
+
+          PanelSectionHeader {
+            text: "ACTIVITY SETTINGS"
+            foreground: root.foreground
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+
+          Text {
+            width: parent.width
+            text: "Changes apply immediately and are saved with your Omarchy bar layout."
+            color: root.dim
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Grid {
+            id: preferenceGrid
+            width: parent.width
+            columns: width >= Style.space(500) ? 2 : 1
+            columnSpacing: Style.spacing.xl
+            rowSpacing: Style.spacing.md
+
+            Dropdown {
+              id: updateSpeedDropdown
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Update speed"
+              value: root.samplingSpeedSetting
+              options: [
+                { value: "Efficient", label: "Efficient · 3 s" },
+                { value: "Balanced", label: "Balanced · 1.5 s" },
+                { value: "Fast", label: "Fast · 0.75 s" }
+              ]
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onChanged: function(next) { root.persistSettings({ samplingSpeed: next }) }
+            }
+
+            Dropdown {
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Graph history"
+              value: String(root.historySamplesSetting)
+              options: [
+                { value: "30", label: "Short · 30 samples" },
+                { value: "60", label: "Medium · 60 samples" },
+                { value: "120", label: "Long · 120 samples" }
+              ]
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onChanged: function(next) { root.persistSettings({ historySamples: Number(next) }) }
+            }
+
+            Dropdown {
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Temperature"
+              value: root.temperatureUnitSetting
+              options: ["Celsius", "Fahrenheit"]
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onChanged: function(next) { root.persistSettings({ temperatureUnit: next }) }
+            }
+
+            Toggle {
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Open detailed view"
+              description: "Start with GPU, graphs, and the full process table."
+              checked: root.openExpandedByDefault
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.persistSettings({ openExpanded: !root.openExpandedByDefault })
+            }
+
+            Toggle {
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Show hardware speeds"
+              description: "Include CPU, RAM, and GPU speeds in headings."
+              checked: root.showFrequencies
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.persistSettings({ showFrequencies: !root.showFrequencies })
+            }
+
+            Toggle {
+              width: (preferenceGrid.width
+                - preferenceGrid.columnSpacing * (preferenceGrid.columns - 1))
+                / preferenceGrid.columns
+              label: "Process power estimates"
+              description: "Measure package energy in detailed view; disable for less work."
+              checked: root.powerEstimatesEnabled
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.persistSettings({ processPowerEnabled: !root.powerEstimatesEnabled })
+            }
+          }
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.spacing.md
+
+        Button {
+          width: (parent.width - parent.spacing) / 2
+          text: "Reset defaults"
+          iconText: "\uf2ea"
+          foreground: root.dim
+          accent: root.accent
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+          focusable: true
+          bordered: true
+          onClicked: root.resetPreferences()
+        }
+
+        Button {
+          width: (parent.width - parent.spacing) / 2
+          text: "Done"
+          iconText: "\uf00c"
+          foreground: root.foreground
+          accent: root.accent
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+          focusable: true
+          bordered: true
+          onClicked: root.setSettingsOpen(false)
+        }
+      }
+    }
+  }
+
+  Component {
     id: expandedContent
 
     Column {
@@ -630,7 +901,7 @@ Panel {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
           label: root.cpuCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.cpu) : "—"
-          detail: root.processPower.available
+          detail: root.powerEstimatesEnabled && root.processPower.available
             ? root.measuredPackagePowerText(root.processPower.watts) + " PACKAGE · "
               + (root.snapshot.cores.length ? root.snapshot.cores.length + " CPUS" : "CPU TOTAL")
             : (root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL CPUS" : "CPU TOTAL")
@@ -661,6 +932,10 @@ Panel {
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
           label: "DISK"
+          badge: root.swapBadgeText()
+          badgeTone: root.snapshot.memory.swapTotal
+            ? root.pressureColor(root.metrics.swap)
+            : root.dim
           value: Model.formatBytes(root.metrics.diskRead, "/s")
           detail: "\uf093  " + Model.formatBytes(root.metrics.diskWrite, "/s")
           history: root.metrics.diskHistory
@@ -866,8 +1141,9 @@ Panel {
 
         Item {
           width: Math.max(0, parent.width - parent.children[0].implicitWidth - searchBox.width
-            - cpuSort.implicitWidth - memorySort.implicitWidth - powerSort.implicitWidth
-            - pidSort.implicitWidth - parent.spacing * 6)
+            - cpuSort.implicitWidth - memorySort.implicitWidth
+            - (root.powerEstimatesEnabled ? powerSort.implicitWidth : 0)
+            - pidSort.implicitWidth - parent.spacing * (root.powerEstimatesEnabled ? 6 : 5))
           height: 1
         }
 
@@ -927,6 +1203,7 @@ Panel {
 
         Button {
           id: powerSort
+          visible: root.powerEstimatesEnabled
           text: root.sortLabel("power", "EST. W")
           selected: root.sortKey === "power"
           tooltipText: root.processPowerTooltip
@@ -1053,7 +1330,9 @@ Panel {
 
       Text {
         width: parent.width
-        text: processActions.status || "e collapse  ·  / search  ·  c/m/w/p/t/n sort  ·  r refresh  ·  j/k select  ·  x end app"
+        text: processActions.status || ("e collapse  ·  / search  ·  "
+          + (root.powerEstimatesEnabled ? "c/m/w/p/t/n" : "c/m/p/t/n")
+          + " sort  ·  r refresh  ·  s settings  ·  j/k select  ·  x end app")
         textFormat: Text.PlainText
         color: processActions.failed ? root.urgent : root.dim
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -1086,12 +1365,26 @@ Panel {
 
       TemperatureBadge {
         visible: root.cpuTemperature !== null
-        text: visible ? Math.round(root.cpuTemperature.value) + "°C" : ""
+        text: visible
+          ? Model.formatTemperature(root.cpuTemperature.value, root.temperatureUnitSetting)
+          : ""
         implicitHeight: expandButton.implicitHeight
       }
 
       PanelActionButton {
+        id: settingsButton
+        iconText: "\uf013"
+        tooltipText: root.settingsOpen ? "Close settings" : "Activity settings"
+        foreground: root.settingsOpen ? root.accent : root.foreground
+        hoverColor: root.accent
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        bordered: true
+        onClicked: root.setSettingsOpen(!root.settingsOpen)
+      }
+
+      PanelActionButton {
         id: expandButton
+        visible: !root.settingsOpen
         iconText: expanded ? "\uf066" : "\uf065"
         tooltipText: expanded ? "Collapse details" : "Expand details"
         foreground: root.foreground
@@ -1123,12 +1416,16 @@ Panel {
   }
 
   component MetricCard: BorderSurface {
+    id: metricCard
+
     property string label: ""
+    property string badge: ""
     property string value: ""
     property string detail: ""
     property var history: []
     property real ceiling: 0
     property color tone: root.accent
+    property color badgeTone: root.dim
 
     implicitHeight: Style.space(92)
     color: Style.normalFillFor(root.foreground, root.accent)
@@ -1140,10 +1437,33 @@ Panel {
       anchors.margins: Style.spacing.lg
       spacing: Style.spacing.xxs
 
-      PanelSectionHeader {
-        text: label
-        foreground: root.foreground
-        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(cardLabel.implicitHeight, cardBadge.implicitHeight)
+
+        PanelSectionHeader {
+          id: cardLabel
+          anchors.left: parent.left
+          anchors.right: cardBadge.visible ? cardBadge.left : parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.rightMargin: cardBadge.visible ? Style.spacing.sm : 0
+          text: metricCard.label
+          foreground: root.foreground
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: cardBadge
+          visible: metricCard.badge !== ""
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: metricCard.badge
+          color: metricCard.badgeTone
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
       }
 
       Text {
@@ -1362,6 +1682,7 @@ Panel {
         alignment: Text.AlignRight
       }
       ProcessCell {
+        visible: root.powerEstimatesEnabled
         width: root.processMetricColumnWidth
         text: "EST. W"
         dimmed: true
@@ -1453,7 +1774,7 @@ Panel {
       }
 
       ProcessCell {
-        visible: !compact
+        visible: !compact && root.powerEstimatesEnabled
         width: root.processMetricColumnWidth
         text: root.estimatedPowerText(processData.power)
         alignment: Text.AlignRight
