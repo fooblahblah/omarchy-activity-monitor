@@ -1700,7 +1700,7 @@ int Run(int argc, char **argv) {
   else if (mode == "--activity-storage")
     sampler.Collect("storage", std::cout);
   else if (mode == "--version")
-    std::cout << "activity-sampler 2.1.0\n";
+    std::cout << "activity-sampler 2.1.1\n";
   else {
     std::cerr << "Usage: activity-sampler "
                  "[--bar-widget|--activity-reader|--activity-resources|"

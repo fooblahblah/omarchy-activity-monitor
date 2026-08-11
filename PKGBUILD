@@ -1,7 +1,7 @@
 # Maintainer: Kristoffer Haugland <stappmus at gmail dot com>
 
 pkgname=omarchy-activity-monitor-power-helper
-pkgver=2.1.0
+pkgver=2.1.1
 pkgrel=1
 pkgdesc="Optional root-only native RAPL reader for the Omarchy Activity Monitor plugin"
 arch=('x86_64')
@@ -18,10 +18,10 @@ source=(
   'LICENSE'
 )
 sha256sums=(
-  'd8a8c3e28934c5d287b47c8637a072443a410c019182d5ebf2882baba13724eb'
+  'bc8463aaac0e75dcea5c36597d5031ab28630d078a438ca87a9044a422ee026c'
   '2ea69385047c3a1d1893378e2866a464cba7ae28040c0add8a3eaa80f94700a3'
   'e248f015e89bc7f3df4714e7d1e0248c4ac9cc4b4642dda6aa428741b6c4f2ca'
-  'f235d1a3cc76031929e2f47343f36fbfdc4e261ec874c61c783cbcdfeddda95a'
+  'e02f364d97fd1c7ef95bb94d607c857ae5052961cdd0c8ac9b24ba2626ca1480'
   'dd56ead2d3379b1d8298bbd1b905188b21894c46312ea4186b2afde9b03b3184'
 )
 
@@ -30,7 +30,7 @@ build() {
 }
 
 check() {
-  [[ $(./activity-sampler --version) == 'activity-sampler 2.1.0' ]]
+  [[ $(./activity-sampler --version) == 'activity-sampler 2.1.1' ]]
   grep -Fxq \
     '%wheel ALL=(root) NOPASSWD: /usr/lib/stappmus-activity-monitor/activity-sampler --activity-process-power-reader' \
     stappmus-activity-monitor.sudoers

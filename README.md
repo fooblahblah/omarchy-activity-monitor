@@ -30,8 +30,9 @@ view after a confirmation.
 
 CPU and GPU clocks are shown in MHz. DDR memory is shown in MT/s because DDR
 transfers data twice per clock cycle; its marketed speed is a transfer rate,
-not a clock frequency. Measurements that the kernel or firmware does not
-expose are omitted instead of estimated.
+not a clock frequency. A GPU clock reported as zero while the graphics engine
+is fully power-gated is shown as `IDLE`, and measurements that the kernel or
+firmware does not expose are omitted instead of estimated.
 
 The `RAM USAGE` card shows used memory and cache together. Used memory follows
 Linux's available-memory accounting: `(MemTotal - MemAvailable) / MemTotal`.

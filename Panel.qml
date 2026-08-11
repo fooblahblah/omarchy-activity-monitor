@@ -254,6 +254,14 @@ Panel {
     return Math.round(frequency) + " " + unit
   }
 
+  function gpuFrequencyText(gpu) {
+    if (!showFrequencies) return ""
+    var frequency = Number(gpu && gpu.frequencyMHz)
+    if (!isFinite(frequency) || frequency < 0) return ""
+    if (frequency === 0) return "IDLE"
+    return Math.round(frequency) + " MHz"
+  }
+
   function cpuCardLabel() {
     var frequency = frequencyText(snapshot.cpuFrequencyMHz, "MHz")
     return frequency ? "CPU · " + frequency : "CPU"
@@ -282,7 +290,7 @@ Panel {
     var bracketed = name.match(/\[([^\]]+)\]/g)
     if (bracketed && bracketed.length > 0)
       name = bracketed[bracketed.length - 1].slice(1, -1)
-    var frequency = frequencyText(adapters[0].frequencyMHz, "MHz")
+    var frequency = gpuFrequencyText(adapters[0])
     return "GPU · " + name.toUpperCase() + (frequency ? " · " + frequency : "")
   }
 
@@ -293,7 +301,7 @@ Panel {
 
   function gpuUsageAndClockText(gpu) {
     var usage = gpuUsageText(gpu)
-    var frequency = frequencyText(gpu && gpu.frequencyMHz, "MHz")
+    var frequency = gpuFrequencyText(gpu)
     return frequency ? usage + " · " + frequency : usage
   }
 

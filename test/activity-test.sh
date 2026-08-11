@@ -196,7 +196,7 @@ grep -Eq '^process[[:space:]]' <<<"$process_snapshot" || fail "activity process 
 pass "activity collector emits the process snapshot contract"
 
 [[ -x $ROOT/activity-sampler ]] || fail "native activity sampler is executable"
-[[ $("$ROOT/activity-sampler" --version) == "activity-sampler 2.1.0" ]] ||
+[[ $("$ROOT/activity-sampler" --version) == "activity-sampler 2.1.1" ]] ||
   fail "native activity sampler reports the release protocol version"
 [[ ! -e $ROOT/activity-process-stats ]] ||
   fail "legacy process helper remains beside the unified native sampler"
@@ -426,7 +426,8 @@ grep -Fq 'function memoryBreakdownText()' "$panel_file" &&
   fail "activity RAM card does not show used memory and cache together"
 grep -Fq 'snapshot.memorySpeedMTs, "MT/s"' "$panel_file" &&
   grep -Fq 'snapshot.cpuFrequencyMHz, "MHz"' "$panel_file" &&
-  grep -Fq 'adapters[0].frequencyMHz, "MHz"' "$panel_file" ||
+  grep -Fq 'var frequency = gpuFrequencyText(adapters[0])' "$panel_file" &&
+  grep -Fq 'if (frequency === 0) return "IDLE"' "$panel_file" ||
   fail "activity card headings do not distinguish DDR transfer rate from CPU and GPU clocks"
 grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
   fail "activity system details do not retain total RAM"
