@@ -956,10 +956,15 @@ Panel {
         spacing: Style.spacing.md
 
         DetailSurface {
+          id: cpuCoresSurface
           width: (parent.width - parent.spacing) / 2
-          height: Style.space(164)
+          height: Math.max(
+            Style.space(164),
+            cpuCoresContent.implicitHeight + Style.spacing.xl * 2
+          )
 
           Column {
+            id: cpuCoresContent
             anchors.fill: parent
             anchors.margins: Style.spacing.xl
             spacing: Style.spacing.sm
@@ -999,7 +1004,7 @@ Panel {
 
         Column {
           width: (parent.width - parent.spacing) / 2
-          height: Style.space(164)
+          height: cpuCoresSurface.height
           spacing: Style.spacing.md
 
           DetailSurface {
