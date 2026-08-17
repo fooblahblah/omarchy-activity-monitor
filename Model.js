@@ -1000,9 +1000,21 @@ function flattenCoreLayout(layout, sizes) {
   }
 
   var anyStack = false
+  var mixedDomain = false
   for (s = 0; s < prepared.length; s++) {
     if (domainHasStack(prepared[s].rows)) anyStack = true
+    var kindsSeen = {}
+    var kindCount = 0
+    var preparedRows = prepared[s].rows
+    for (var kr = 0; kr < preparedRows.length; kr++) {
+      var rowKind = String(preparedRows[kr].kind || "same")
+      if (kindsSeen[rowKind]) continue
+      kindsSeen[rowKind] = true
+      kindCount++
+    }
+    if (kindCount >= 2) mixedDomain = true
   }
+  var stackDomains = prepared.length >= 2 && !mixedDomain
 
   function packedRows(domainRows) {
     var rows = []
@@ -1016,6 +1028,7 @@ function flattenCoreLayout(layout, sizes) {
         && rowCells.length >= 2
         && rowCells.length <= 4
         && anyStack
+        && !stackDomains
       if (rotate) {
         for (var c = 0; c < rowCells.length; c++)
           rows.push({ kind: kind, size: size, cells: [rowCells[c]], column: true })
@@ -1065,21 +1078,38 @@ function flattenCoreLayout(layout, sizes) {
       if (packed[d].innerHeight > primaryInnerHeight) primaryInnerHeight = packed[d].innerHeight
   }
 
-  var x = 0
+  var placed = []
+  var maxFrameWidth = 0
   for (d = 0; d < packed.length; d++) {
     var spec = packed[d]
+    var contentHeight = stackDomains ? spec.innerHeight : primaryInnerHeight
     var frameWidth = spec.innerWidth + pad * 2
-    var frameHeight = primaryInnerHeight + pad * 2
-    frames.push({ x: x, y: 0, w: frameWidth, h: frameHeight })
+    placed.push({
+      spec: spec,
+      frameWidth: frameWidth,
+      frameHeight: contentHeight + pad * 2,
+      contentHeight: contentHeight
+    })
+    if (frameWidth > maxFrameWidth) maxFrameWidth = frameWidth
+  }
+
+  var x = 0
+  var y = 0
+  for (d = 0; d < placed.length; d++) {
+    var item = placed[d]
+    spec = item.spec
+    var originX = stackDomains ? Math.round((maxFrameWidth - item.frameWidth) / 2) : x
+    var originY = stackDomains ? y : 0
+    frames.push({ x: originX, y: originY, w: item.frameWidth, h: item.frameHeight })
 
     var rowSize = []
     for (var m = 0; m < spec.rows.length; m++) rowSize.push(spec.rows[m].size)
 
     if (spec.column && spec.rows.length > 0) {
       var columnSpan = spec.rows.length * rowSize[0] + Math.max(0, spec.rows.length - 1) * gap
-      if (columnSpan > primaryInnerHeight) {
+      if (columnSpan > item.contentHeight) {
         var fitted = Math.max(2, Math.floor(
-          (primaryInnerHeight - Math.max(0, spec.rows.length - 1) * gap) / spec.rows.length
+          (item.contentHeight - Math.max(0, spec.rows.length - 1) * gap) / spec.rows.length
         ))
         for (m = 0; m < rowSize.length; m++) rowSize[m] = fitted
       }
@@ -1090,7 +1120,7 @@ function flattenCoreLayout(layout, sizes) {
       if (m > 0) stackHeight += gap
       stackHeight += rowSize[m]
     }
-    var y = pad + Math.round((primaryInnerHeight - stackHeight) / 2)
+    var cy = originY + pad + Math.round((item.contentHeight - stackHeight) / 2)
     var spanWidth = spec.innerWidth
     for (m = 0; m < spec.rows.length; m++) {
       if (spec.rows[m].kind === "performance") {
@@ -1104,21 +1134,21 @@ function flattenCoreLayout(layout, sizes) {
       var n = row.cells.length
       var size = rowSize[m]
       var packedWidth = n * size + Math.max(0, n - 1) * gap
-      var cx = x + pad
+      var cx = originX + pad
       var step = gap
       if (spec.column || row.kind === "performance" || n <= 1) {
-        cx = x + pad + Math.round((spec.innerWidth - packedWidth) / 2)
+        cx = originX + pad + Math.round((spec.innerWidth - packedWidth) / 2)
       } else if (spanWidth > 0 && packedWidth <= spanWidth) {
-        cx = x + pad + Math.round((spec.innerWidth - spanWidth) / 2)
+        cx = originX + pad + Math.round((spec.innerWidth - spanWidth) / 2)
         step = n > 1 ? (spanWidth - n * size) / (n - 1) : gap
       } else {
-        cx = x + pad + Math.round((spec.innerWidth - packedWidth) / 2)
+        cx = originX + pad + Math.round((spec.innerWidth - packedWidth) / 2)
       }
       for (var c = 0; c < n; c++) {
         var cell = row.cells[c]
         cells.push({
           x: cx,
-          y: y,
+          y: cy,
           size: size,
           kind: row.kind,
           name: String(cell.name || "cpu"),
@@ -1127,14 +1157,15 @@ function flattenCoreLayout(layout, sizes) {
         })
         cx += size + step
       }
-      y += size + gap
+      cy += size + gap
     }
-    x += frameWidth + domainGap
+    if (stackDomains) y += item.frameHeight + domainGap
+    else x += item.frameWidth + domainGap
   }
 
   return {
-    width: cells.length === 0 ? 0 : Math.max(0, x - domainGap),
-    height: primaryInnerHeight + pad * 2,
+    width: cells.length === 0 ? 0 : (stackDomains ? maxFrameWidth : Math.max(0, x - domainGap)),
+    height: cells.length === 0 ? 0 : (stackDomains ? Math.max(0, y - domainGap) : primaryInnerHeight + pad * 2),
     frames: frames,
     cells: cells
   }
@@ -1336,7 +1367,7 @@ function previewCoreCatalog(sizes) {
       "Your class of chip. P and E share one L3; LP-E sit in their own square.",
       panther, sizes),
     previewCoreEntry("panther-8", "Panther / Lunar slim · 4P + 4LP-E",
-      "No mid E-cluster. Two cache squares of four cores.",
+      "No mid E-cluster. Two cache squares stacked.",
       pantherSlim, sizes),
     previewCoreEntry("meteor-16", "Meteor Lake · 6P + 8E + 2LP-E",
       "Compute-tile P+E with a two-core LP-E island on the SoC tile.",
@@ -1348,7 +1379,7 @@ function previewCoreCatalog(sizes) {
       "Two core classes, one last-level cache.",
       raptor, sizes),
     previewCoreEntry("strix-12", "Strix Point · 4 Zen 5 + 8 Zen 5c",
-      "Two CCX squares with separate L3 slices.",
+      "Two CCX squares stacked. Zen 5 over Zen 5c.",
       strix, sizes),
     previewCoreEntry("arm-8", "ARM big.LITTLE · 1 + 3 + 4",
       "One shared DSU. Three size tiers in a single square.",

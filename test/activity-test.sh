@@ -287,6 +287,23 @@ for (let i = 4; i < 8; i++) lunar.push(topo(i, 'lowpower', '4-7', '4-7', i))
 const lunarDie = activity.coreLayout(usages(8), lunar)
 assertEqual(lunarDie.domains.length, 2, 'activity splits Lunar Lake P-cores from LP-E')
 assertEqual(lunarDie.domains[0].rows[0].kind, 'performance', 'activity shows Lunar Lake P-cores as the primary square')
+const lunarPaint = activity.flattenCoreLayout(lunarDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+assertEqual(lunarPaint.frames[1].y > lunarPaint.frames[0].y, true,
+  'activity stacks Lunar Lake cache squares instead of placing them in a row')
+assertEqual(lunarPaint.frames[1].x >= lunarPaint.frames[0].x, true,
+  'activity centers the narrower Lunar Lake LP-E square under the P-cores')
+const lunarP = lunarPaint.cells.filter(cell => cell.kind === 'performance')
+const lunarLp = lunarPaint.cells.filter(cell => cell.kind === 'lowpower')
+assertEqual(lunarP.every(cell => cell.y === lunarP[0].y), true,
+  'activity keeps Lunar Lake P-cores on one row')
+assertEqual(lunarLp.every(cell => cell.y === lunarLp[0].y), true,
+  'activity keeps Lunar Lake LP-E cores on one row')
+assertEqual(lunarLp[0].y > lunarP[0].y, true,
+  'activity places Lunar Lake LP-E under the P-cores')
+assertEqual(lunarPaint.width < lunarPaint.frames[0].w + lunarPaint.frames[1].w,
+  true, 'activity stacks Lunar Lake caches to take less width')
 
 const strix = []
 for (let i = 0; i < 4; i++) strix.push(topo(i, 'performance', '0-3', '0-3', i))
@@ -296,6 +313,17 @@ assertEqual(strixDie.domains.length, 2, 'activity splits Strix Point Zen 5 and Z
 assertEqual(strixDie.domains[0].rows[0].cells.length, 4, 'activity shows four Zen 5 cores in the larger square')
 assertEqual(strixDie.domains[1].rows.length, 2, 'activity keeps Zen 5c cores as two rows in their CCX')
 assertEqual(strixDie.domains[1].rows[0].cells.length, 4, 'activity shows four Zen 5c cores per row')
+const strixPaint = activity.flattenCoreLayout(strixDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+assertEqual(strixPaint.frames[1].y > strixPaint.frames[0].y, true,
+  'activity stacks Strix Point CCX squares instead of placing them in a row')
+const strixP = strixPaint.cells.filter(cell => cell.kind === 'performance')
+const strixE = strixPaint.cells.filter(cell => cell.kind === 'efficiency')
+assertEqual(strixE[0].y > strixP[0].y, true,
+  'activity places Strix Point Zen 5c under the Zen 5 cores')
+assertEqual(strixPaint.width < strixPaint.frames[0].w + strixPaint.frames[1].w,
+  true, 'activity stacks Strix Point caches to take less width')
 
 const arm = []
 for (let i = 0; i < 1; i++) arm.push(topo(i, 'performance', '0-7', '0', i))
