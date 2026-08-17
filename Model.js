@@ -15,6 +15,7 @@ function emptySnapshot() {
     memorySpeedMTs: -1,
     cpu: { total: 0, idle: 0 },
     cores: [],
+    topology: [],
     memory: {
       total: 0,
       available: 0,
@@ -195,6 +196,15 @@ function parseSnapshot(raw) {
         name: String(fields[2] || ""),
         read: number(fields[3]) * 512,
         written: number(fields[4]) * 512
+      })
+    } else if (kind === "cpu-topo") {
+      snapshot.topology.push({
+        id: number(fields[1]),
+        cls: String(fields[2] || "performance"),
+        domain: String(fields[3] || ""),
+        cluster: String(fields[4] || ""),
+        core: number(fields[5]),
+        maxKhz: number(fields[6])
       })
     }
   }
@@ -758,6 +768,602 @@ function estimateProcessPower(processes, packageWatts, systemBusyDelta) {
   return result
 }
 
+function specializedTopology(topology) {
+  var values = Array.isArray(topology) ? topology : []
+  var seen = {}
+  var count = 0
+  for (var i = 0; i < values.length; i++) {
+    var cls = String(values[i] && values[i].cls || "")
+    if (cls !== "performance" && cls !== "efficiency" && cls !== "lowpower") continue
+    if (seen[cls]) continue
+    seen[cls] = true
+    count++
+  }
+  return count >= 2
+}
+
+function coreUsageLookup(metricCores) {
+  var usage = {}
+  var values = Array.isArray(metricCores) ? metricCores : []
+  for (var i = 0; i < values.length; i++) {
+    usage[String(values[i].name || "")] = number(values[i].usage)
+  }
+  return usage
+}
+
+function physicalCoreKey(entry) {
+  return String(number(entry && entry.core, entry && entry.id))
+}
+
+function topologyCell(members, usageByName) {
+  var logicals = []
+  var usage = 0
+  var name = "cpu0"
+  for (var i = 0; i < members.length; i++) {
+    var logical = "cpu" + number(members[i].id)
+    logicals.push(logical)
+    if (i === 0) name = logical
+    usage = Math.max(usage, number(usageByName[logical]))
+  }
+  return { name: name, logicals: logicals, usage: usage }
+}
+
+function coreLayout(metricCores, topology) {
+  var values = Array.isArray(metricCores) ? metricCores : []
+  var topo = Array.isArray(topology) ? topology : []
+  var usageByName = coreUsageLookup(values)
+  if (!specializedTopology(topo)) {
+    return {
+      mode: "uniform",
+      domains: [{
+        id: "all",
+        rows: [{
+          kind: "same",
+          cells: values.map(function(core) {
+            return {
+              name: String(core.name || "cpu"),
+              logicals: [String(core.name || "cpu")],
+              usage: number(core.usage)
+            }
+          })
+        }]
+      }]
+    }
+  }
+
+  var domains = {}
+  var domainOrder = []
+  for (var i = 0; i < topo.length; i++) {
+    var entry = topo[i]
+    var domain = String(entry.domain || "all")
+    if (!domains[domain]) {
+      domains[domain] = []
+      domainOrder.push(domain)
+    }
+    domains[domain].push(entry)
+  }
+
+  domainOrder.sort(function(left, right) {
+    var leftScore = 0
+    var rightScore = 0
+    for (var a = 0; a < domains[left].length; a++) {
+      if (domains[left][a].cls === "performance") leftScore += 10
+      leftScore += 1
+    }
+    for (var b = 0; b < domains[right].length; b++) {
+      if (domains[right][b].cls === "performance") rightScore += 10
+      rightScore += 1
+    }
+    if (leftScore !== rightScore) return rightScore - leftScore
+    return left < right ? -1 : 1
+  })
+
+  var kinds = ["performance", "efficiency", "lowpower"]
+  var result = { mode: "die", domains: [] }
+
+  for (var d = 0; d < domainOrder.length; d++) {
+    var members = domains[domainOrder[d]]
+    var rows = []
+    for (var k = 0; k < kinds.length; k++) {
+      var kind = kinds[k]
+      var ofKind = []
+      for (var m = 0; m < members.length; m++) {
+        if (members[m].cls === kind) ofKind.push(members[m])
+      }
+      if (ofKind.length === 0) continue
+
+      var coreOrder = []
+      var byCore = {}
+      for (var p = 0; p < ofKind.length; p++) {
+        var key = physicalCoreKey(ofKind[p])
+        if (!byCore[key]) {
+          byCore[key] = []
+          coreOrder.push(key)
+        }
+        byCore[key].push(ofKind[p])
+      }
+      var cells = []
+      for (var o = 0; o < coreOrder.length; o++) cells.push(topologyCell(byCore[coreOrder[o]], usageByName))
+      var wrap = kind === "performance" ? 8 : 4
+      for (var slice = 0; slice < cells.length; slice += wrap)
+        rows.push({ kind: kind, cells: cells.slice(slice, slice + wrap) })
+    }
+    if (rows.length > 0) result.domains.push({ id: domainOrder[d], rows: rows })
+  }
+
+  if (result.domains.length === 0) {
+    return coreLayout(values, [])
+  }
+  return result
+}
+
+function uniformColumnCount(count) {
+  if (count <= 0) return 1
+  if (count <= 4) return count
+  if (count <= 6) return 3
+  if (count <= 16) return 4
+  if (count <= 24) return 6
+  return 8
+}
+
+function coreCellSize(kind, sizes) {
+  if (kind === "performance") return number(sizes && sizes.performance, 9)
+  if (kind === "same") return number(sizes && sizes.same, 7)
+  return number(sizes && sizes.efficiency, 6)
+}
+
+function flattenCoreLayout(layout, sizes) {
+  var gap = number(sizes && sizes.gap, 2)
+  var domainGap = number(sizes && sizes.domainGap, 4)
+  var pad = number(sizes && sizes.pad, 2)
+  var source = layout && typeof layout === "object" ? layout : { mode: "uniform", domains: [] }
+  var domains = Array.isArray(source.domains) ? source.domains : []
+  var frames = []
+  var cells = []
+  var die = source.mode === "die"
+
+  if (!die) {
+    var uniform = domains[0] && domains[0].rows && domains[0].rows[0]
+      ? domains[0].rows[0].cells
+      : []
+    var count = Array.isArray(uniform) ? uniform.length : 0
+    var columns = uniformColumnCount(count)
+    var size = coreCellSize("same", sizes)
+    var rows = Math.ceil(Math.max(1, count) / columns)
+    for (var i = 0; i < count; i++) {
+      var col = i % columns
+      var row = Math.floor(i / columns)
+      cells.push({
+        x: col * (size + gap),
+        y: row * (size + gap),
+        size: size,
+        kind: "same",
+        name: String(uniform[i].name || "cpu"),
+        usage: number(uniform[i].usage),
+        logicals: uniform[i].logicals || [String(uniform[i].name || "cpu")]
+      })
+    }
+    return {
+      width: count === 0 ? 0 : columns * size + Math.max(0, columns - 1) * gap,
+      height: count === 0 ? 0 : rows * size + Math.max(0, rows - 1) * gap,
+      frames: [],
+      cells: cells
+    }
+  }
+
+  function mergeEfficiencyIfFits(domainRows) {
+    var source = Array.isArray(domainRows) ? domainRows : []
+    var pWidth = 0
+    var eCells = []
+    var eRows = 0
+    for (var r = 0; r < source.length; r++) {
+      var kind = String(source[r].kind || "same")
+      var rowCells = Array.isArray(source[r].cells) ? source[r].cells : []
+      if (kind === "performance") {
+        pWidth = Math.max(pWidth,
+          rowCells.length * coreCellSize(kind, sizes) + Math.max(0, rowCells.length - 1) * gap)
+      }
+      if (kind === "efficiency") {
+        eRows++
+        for (var i = 0; i < rowCells.length; i++) eCells.push(rowCells[i])
+      }
+    }
+    if (eRows < 2 || eCells.length === 0 || pWidth <= 0) return source
+    var eSize = coreCellSize("efficiency", sizes)
+    var oneRowWidth = eCells.length * eSize + Math.max(0, eCells.length - 1) * gap
+    if (oneRowWidth > pWidth) return source
+    var merged = []
+    var inserted = false
+    for (r = 0; r < source.length; r++) {
+      if (String(source[r].kind || "") === "efficiency") {
+        if (!inserted) {
+          merged.push({ kind: "efficiency", cells: eCells })
+          inserted = true
+        }
+        continue
+      }
+      merged.push(source[r])
+    }
+    return merged
+  }
+
+  function domainHasStack(domainRows) {
+    return Array.isArray(domainRows) && domainRows.length > 1
+  }
+
+  var prepared = []
+  for (var s = 0; s < domains.length; s++) {
+    prepared.push({
+      id: domains[s].id,
+      rows: mergeEfficiencyIfFits(domains[s].rows)
+    })
+  }
+
+  var anyStack = false
+  for (s = 0; s < prepared.length; s++) {
+    if (domainHasStack(prepared[s].rows)) anyStack = true
+  }
+
+  function packedRows(domainRows) {
+    var rows = []
+    var source = Array.isArray(domainRows) ? domainRows : []
+    for (var r = 0; r < source.length; r++) {
+      var kind = String(source[r].kind || "same")
+      var rowCells = Array.isArray(source[r].cells) ? source[r].cells.slice() : []
+      var size = coreCellSize(kind, sizes)
+      var rotate = kind !== "performance"
+        && source.length === 1
+        && rowCells.length >= 2
+        && rowCells.length <= 4
+        && anyStack
+      if (rotate) {
+        for (var c = 0; c < rowCells.length; c++)
+          rows.push({ kind: kind, size: size, cells: [rowCells[c]], column: true })
+        continue
+      }
+      rows.push({ kind: kind, size: size, cells: rowCells, column: false })
+    }
+    return rows
+  }
+
+  function rowWidth(row) {
+    var n = row.cells.length
+    if (n === 0) return 0
+    return n * row.size + Math.max(0, n - 1) * gap
+  }
+
+  function rowsHeight(rows) {
+    var height = 0
+    for (var r = 0; r < rows.length; r++) {
+      if (r > 0) height += gap
+      height += rows[r].size
+    }
+    return height
+  }
+
+  var packed = []
+  var primaryInnerHeight = 0
+  for (var d = 0; d < prepared.length; d++) {
+    var measured = packedRows(Array.isArray(prepared[d].rows) ? prepared[d].rows : [])
+    var innerWidth = 0
+    var column = measured.length > 0
+    for (var r = 0; r < measured.length; r++) {
+      innerWidth = Math.max(innerWidth, rowWidth(measured[r]))
+      if (!measured[r].column) column = false
+    }
+    var innerHeight = rowsHeight(measured)
+    packed.push({
+      rows: measured,
+      innerWidth: innerWidth,
+      innerHeight: innerHeight,
+      column: column
+    })
+    if (!column && innerHeight > primaryInnerHeight) primaryInnerHeight = innerHeight
+  }
+  if (primaryInnerHeight <= 0) {
+    for (d = 0; d < packed.length; d++)
+      if (packed[d].innerHeight > primaryInnerHeight) primaryInnerHeight = packed[d].innerHeight
+  }
+
+  var x = 0
+  for (d = 0; d < packed.length; d++) {
+    var spec = packed[d]
+    var frameWidth = spec.innerWidth + pad * 2
+    var frameHeight = primaryInnerHeight + pad * 2
+    frames.push({ x: x, y: 0, w: frameWidth, h: frameHeight })
+
+    var rowSize = []
+    for (var m = 0; m < spec.rows.length; m++) rowSize.push(spec.rows[m].size)
+
+    if (spec.column && spec.rows.length > 0) {
+      var columnSpan = spec.rows.length * rowSize[0] + Math.max(0, spec.rows.length - 1) * gap
+      if (columnSpan > primaryInnerHeight) {
+        var fitted = Math.max(2, Math.floor(
+          (primaryInnerHeight - Math.max(0, spec.rows.length - 1) * gap) / spec.rows.length
+        ))
+        for (m = 0; m < rowSize.length; m++) rowSize[m] = fitted
+      }
+    }
+
+    var stackHeight = 0
+    for (m = 0; m < spec.rows.length; m++) {
+      if (m > 0) stackHeight += gap
+      stackHeight += rowSize[m]
+    }
+    var y = pad + Math.round((primaryInnerHeight - stackHeight) / 2)
+    var spanWidth = spec.innerWidth
+    for (m = 0; m < spec.rows.length; m++) {
+      if (spec.rows[m].kind === "performance") {
+        spanWidth = rowWidth(spec.rows[m])
+        break
+      }
+    }
+
+    for (m = 0; m < spec.rows.length; m++) {
+      var row = spec.rows[m]
+      var n = row.cells.length
+      var size = rowSize[m]
+      var packedWidth = n * size + Math.max(0, n - 1) * gap
+      var cx = x + pad
+      var step = gap
+      if (spec.column || row.kind === "performance" || n <= 1) {
+        cx = x + pad + Math.round((spec.innerWidth - packedWidth) / 2)
+      } else if (spanWidth > 0 && packedWidth <= spanWidth) {
+        cx = x + pad + Math.round((spec.innerWidth - spanWidth) / 2)
+        step = n > 1 ? (spanWidth - n * size) / (n - 1) : gap
+      } else {
+        cx = x + pad + Math.round((spec.innerWidth - packedWidth) / 2)
+      }
+      for (var c = 0; c < n; c++) {
+        var cell = row.cells[c]
+        cells.push({
+          x: cx,
+          y: y,
+          size: size,
+          kind: row.kind,
+          name: String(cell.name || "cpu"),
+          usage: number(cell.usage),
+          logicals: cell.logicals || [String(cell.name || "cpu")]
+        })
+        cx += size + step
+      }
+      y += size + gap
+    }
+    x += frameWidth + domainGap
+  }
+
+  return {
+    width: cells.length === 0 ? 0 : Math.max(0, x - domainGap),
+    height: primaryInnerHeight + pad * 2,
+    frames: frames,
+    cells: cells
+  }
+}
+
+var flattenMemo = {}
+var catalogMemo = { key: "", value: null }
+var emptyPaint = { width: 0, height: 0, frames: [], cells: [] }
+
+function sizesKey(sizes) {
+  return [
+    number(sizes && sizes.gap, 2),
+    number(sizes && sizes.domainGap, 4),
+    number(sizes && sizes.pad, 2),
+    number(sizes && sizes.performance, 9),
+    number(sizes && sizes.efficiency, 6),
+    number(sizes && sizes.same, 7)
+  ].join(",")
+}
+
+function topologySignature(topology) {
+  var values = Array.isArray(topology) ? topology : []
+  var parts = new Array(values.length)
+  for (var i = 0; i < values.length; i++) {
+    var entry = values[i] || {}
+    parts[i] = number(entry.id) + ":" + String(entry.cls || "") + ":"
+      + String(entry.domain || "") + ":" + String(entry.cluster || "") + ":"
+      + number(entry.core)
+  }
+  return parts.join("|")
+}
+
+function sameTopology(left, right) {
+  if (left === right) return true
+  var a = Array.isArray(left) ? left : []
+  var b = Array.isArray(right) ? right : []
+  if (a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    if (number(a[i].id) !== number(b[i].id)
+      || String(a[i].cls || "") !== String(b[i].cls || "")
+      || String(a[i].domain || "") !== String(b[i].domain || "")
+      || String(a[i].cluster || "") !== String(b[i].cluster || "")
+      || number(a[i].core) !== number(b[i].core)) {
+      return false
+    }
+  }
+  return true
+}
+
+function cellUsage(cell, usageByName) {
+  var logicals = cell && cell.logicals
+  if (!logicals || logicals.length === 0)
+    return number(usageByName[String(cell && cell.name || "")])
+  var usage = 0
+  for (var i = 0; i < logicals.length; i++)
+    usage = Math.max(usage, number(usageByName[String(logicals[i])]))
+  return usage
+}
+
+function applyPaintUsage(paint, metricCores) {
+  if (!paint || !Array.isArray(paint.cells)) return paint
+  var usageByName = coreUsageLookup(metricCores)
+  var source = paint.cells
+  var nextCells = new Array(source.length)
+  for (var i = 0; i < source.length; i++) {
+    var usage = cellUsage(source[i], usageByName)
+    if (usage === source[i].usage) {
+      nextCells[i] = source[i]
+      continue
+    }
+    nextCells[i] = {
+      x: source[i].x,
+      y: source[i].y,
+      size: source[i].size,
+      kind: source[i].kind,
+      name: source[i].name,
+      usage: usage,
+      logicals: source[i].logicals
+    }
+  }
+  return {
+    width: paint.width,
+    height: paint.height,
+    frames: paint.frames,
+    cells: nextCells
+  }
+}
+
+function pruneFlattenMemo() {
+  var keys = Object.keys(flattenMemo)
+  if (keys.length <= 8) return
+  for (var i = 0; i < keys.length - 8; i++) delete flattenMemo[keys[i]]
+}
+
+function emptyCorePaint() {
+  return emptyPaint
+}
+
+function paintCoreLayout(metricCores, topology, sizes, slot) {
+  var cores = Array.isArray(metricCores) ? metricCores : []
+  var topo = Array.isArray(topology) ? topology : []
+  var key = String(slot || "default") + ":" + sizesKey(sizes) + ":"
+    + (specializedTopology(topo) ? topologySignature(topo) : "u" + cores.length)
+  var geometry = flattenMemo[key]
+  if (!geometry) {
+    geometry = flattenCoreLayout(coreLayout(cores, topo), sizes)
+    flattenMemo[key] = geometry
+    pruneFlattenMemo()
+  }
+  return applyPaintUsage(geometry, cores)
+}
+
+function previewTopo(id, cls, domain, cluster, core) {
+  return {
+    id: id,
+    cls: cls,
+    domain: domain,
+    cluster: String(cluster),
+    core: core,
+    maxKhz: 0
+  }
+}
+
+function previewCoresFor(topology) {
+  var values = Array.isArray(topology) ? topology : []
+  var cores = []
+  for (var i = 0; i < values.length; i++) {
+    var cls = String(values[i].cls || "same")
+    var usage = 12 + (i % 7) * 5
+    if (cls === "performance") usage = 48 + (i % 4) * 12
+    else if (cls === "efficiency") usage = 16 + (i % 5) * 7
+    else if (cls === "lowpower") usage = 5 + (i % 3) * 4
+    cores.push({ name: "cpu" + number(values[i].id), usage: usage })
+  }
+  return cores
+}
+
+function previewCoreEntry(id, title, detail, topology, sizes) {
+  var cores = previewCoresFor(topology)
+  var layout = coreLayout(cores, topology)
+  return {
+    id: id,
+    title: title,
+    detail: detail,
+    mode: layout.mode,
+    paint: flattenCoreLayout(layout, sizes)
+  }
+}
+
+function previewCoreCatalog(sizes) {
+  var key = sizesKey(sizes)
+  if (catalogMemo.key === key && catalogMemo.value) return catalogMemo.value
+
+  var panther = []
+  var i
+  for (i = 0; i < 4; i++) panther.push(previewTopo(i, "performance", "0-11", i, i))
+  for (i = 4; i < 8; i++) panther.push(previewTopo(i, "efficiency", "0-11", "4-7", i))
+  for (i = 8; i < 12; i++) panther.push(previewTopo(i, "efficiency", "0-11", "8-11", i))
+  for (i = 12; i < 16; i++) panther.push(previewTopo(i, "lowpower", "12-15", "12-15", i))
+
+  var pantherSlim = []
+  for (i = 0; i < 4; i++) pantherSlim.push(previewTopo(i, "performance", "0-3", i, i))
+  for (i = 4; i < 8; i++) pantherSlim.push(previewTopo(i, "lowpower", "4-7", "4-7", i))
+
+  var meteor = []
+  for (i = 0; i < 6; i++) meteor.push(previewTopo(i, "performance", "0-13", i, i))
+  for (i = 6; i < 14; i++) meteor.push(previewTopo(i, "efficiency", "0-13", i < 10 ? "6-9" : "10-13", i))
+  for (i = 14; i < 16; i++) meteor.push(previewTopo(i, "lowpower", "14-15", "14-15", i))
+
+  var alder = []
+  for (i = 0; i < 16; i += 2) {
+    alder.push(previewTopo(i, "performance", "0-23", i, i))
+    alder.push(previewTopo(i + 1, "performance", "0-23", i, i))
+  }
+  for (i = 16; i < 20; i++) alder.push(previewTopo(i, "efficiency", "0-23", "16-19", i))
+  for (i = 20; i < 24; i++) alder.push(previewTopo(i, "efficiency", "0-23", "20-23", i))
+
+  var raptor = []
+  for (i = 0; i < 6; i++) raptor.push(previewTopo(i, "performance", "0-13", i, i))
+  for (i = 6; i < 14; i++) raptor.push(previewTopo(i, "efficiency", "0-13", i < 10 ? "6-9" : "10-13", i))
+
+  var strix = []
+  for (i = 0; i < 4; i++) strix.push(previewTopo(i, "performance", "0-3", "0-3", i))
+  for (i = 4; i < 12; i++) strix.push(previewTopo(i, "efficiency", "4-11", "4-11", i))
+
+  var arm = []
+  arm.push(previewTopo(0, "performance", "0-7", "0", 0))
+  for (i = 1; i < 4; i++) arm.push(previewTopo(i, "efficiency", "0-7", "1-3", i))
+  for (i = 4; i < 8; i++) arm.push(previewTopo(i, "lowpower", "0-7", "4-7", i))
+
+  var oryon = []
+  for (i = 0; i < 12; i++) oryon.push(previewTopo(i, "performance", "0-11", String(Math.floor(i / 4)), i))
+
+  var desktop = []
+  for (i = 0; i < 16; i++) desktop.push(previewTopo(i, "performance", "0-15", i, i))
+
+  var catalog = [
+    previewCoreEntry("panther-16", "Panther Lake · 4P + 8E + 4LP-E",
+      "Your class of chip. P and E share one L3; LP-E sit in their own square.",
+      panther, sizes),
+    previewCoreEntry("panther-8", "Panther / Lunar slim · 4P + 4LP-E",
+      "No mid E-cluster. Two cache squares of four cores.",
+      pantherSlim, sizes),
+    previewCoreEntry("meteor-16", "Meteor Lake · 6P + 8E + 2LP-E",
+      "Compute-tile P+E with a two-core LP-E island on the SoC tile.",
+      meteor, sizes),
+    previewCoreEntry("alder-24", "Alder / Raptor Lake · 8P SMT + 8E",
+      "One shared cache. Hyperthreads collapse into eight larger P-cells.",
+      alder, sizes),
+    previewCoreEntry("raptor-14", "Raptor Lake · 6P + 8E",
+      "Two core classes, one last-level cache.",
+      raptor, sizes),
+    previewCoreEntry("strix-12", "Strix Point · 4 Zen 5 + 8 Zen 5c",
+      "Two CCX squares with separate L3 slices.",
+      strix, sizes),
+    previewCoreEntry("arm-8", "ARM big.LITTLE · 1 + 3 + 4",
+      "One shared DSU. Three size tiers in a single square.",
+      arm, sizes),
+    previewCoreEntry("oryon-12", "Snapdragon X Elite · 12 equal cores",
+      "Three identical clusters. Regular grid, not a hybrid die.",
+      oryon, sizes),
+    previewCoreEntry("desktop-16", "Homogeneous desktop · 16 threads",
+      "Older or all-P packages keep the regular mosaic.",
+      desktop, sizes)
+  ]
+  catalogMemo = { key: key, value: catalog }
+  return catalog
+}
+
 function processIdentityKey(process) {
   if (!process) return ""
   return String(number(process.pid)) + ":" + String(number(process.startTicks))
@@ -944,6 +1550,13 @@ if (typeof module !== "undefined") {
     baselineMetrics: baselineMetrics,
     nextMetrics: nextMetrics,
     nextProcesses: nextProcesses,
+    specializedTopology: specializedTopology,
+    sameTopology: sameTopology,
+    coreLayout: coreLayout,
+    flattenCoreLayout: flattenCoreLayout,
+    paintCoreLayout: paintCoreLayout,
+    emptyCorePaint: emptyCorePaint,
+    previewCoreCatalog: previewCoreCatalog,
     processSystemBusyDelta: processSystemBusyDelta,
     estimateProcessPower: estimateProcessPower,
     processIdentityKey: processIdentityKey,

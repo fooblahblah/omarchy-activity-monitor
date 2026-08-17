@@ -163,6 +163,195 @@ assertEqual(activity.samplingProfile('Fast').resources, 750, 'activity offers a 
 assertEqual(activity.samplingProfile('unknown').name, 'Balanced', 'activity safely defaults unknown sampling profiles')
 assertEqual(activity.formatTemperature(20, 'Celsius'), '20°C', 'activity formats Celsius temperatures')
 assertEqual(activity.formatTemperature(20, 'Fahrenheit'), '68°F', 'activity converts temperatures to Fahrenheit')
+
+function topo(id, cls, domain, cluster, core) {
+  return { id, cls, domain, cluster, core, maxKhz: 0 }
+}
+function usages(count) {
+  return Array.from({ length: count }, (_, i) => ({ name: 'cpu' + i, usage: i + 1 }))
+}
+const panther = []
+for (let i = 0; i < 4; i++) panther.push(topo(i, 'performance', '0-11', String(i), i))
+for (let i = 4; i < 8; i++) panther.push(topo(i, 'efficiency', '0-11', '4-7', i))
+for (let i = 8; i < 12; i++) panther.push(topo(i, 'efficiency', '0-11', '8-11', i))
+for (let i = 12; i < 16; i++) panther.push(topo(i, 'lowpower', '12-15', '12-15', i))
+const pantherDie = activity.coreLayout(usages(16), panther)
+assertEqual(pantherDie.mode, 'die', 'activity uses a specialized die for P+E+LP-E')
+assertEqual(pantherDie.domains.length, 2, 'activity separates Panther Lake cache domains')
+assertDeepEqual(pantherDie.domains[0].rows.map(row => row.kind + ':' + row.cells.length),
+  ['performance:4', 'efficiency:4', 'efficiency:4'],
+  'activity places 4 P-cores above two E-core rows in the shared-cache square')
+assertEqual(pantherDie.domains[1].rows[0].kind, 'lowpower', 'activity keeps LP-E cores in their own square')
+assertEqual(pantherDie.domains[1].rows[0].cells.length, 4, 'activity shows four LP-E cores')
+const pantherPaint = activity.flattenCoreLayout(pantherDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+assertEqual(pantherPaint.frames.length, 2, 'activity paints a frame per cache domain')
+assertEqual(pantherPaint.frames[0].h, pantherPaint.frames[1].h,
+  'activity keeps both cache squares the same height')
+assertEqual(pantherPaint.frames[1].w < pantherPaint.frames[0].w, true,
+  'activity rotates the LP-E cache into a narrower column')
+assertEqual(pantherPaint.cells.length, 16, 'activity paints every hybrid core as a positioned cell')
+assertEqual(pantherPaint.cells[0].size, 9, 'activity draws P-cores larger than E-cores')
+assertEqual(pantherPaint.cells[4].size, 6, 'activity draws E-cores at the cluster size')
+assertEqual(pantherPaint.cells[4].kind, 'efficiency', 'activity starts the E-core rows after the P-cores')
+assertEqual(pantherPaint.cells[8].kind, 'efficiency', 'activity keeps a second E-core row in the shared-cache square')
+assertEqual(pantherPaint.cells[12].kind, 'lowpower', 'activity paints LP-E cores after the shared-cache square')
+assertEqual(pantherPaint.cells[12].x === pantherPaint.cells[15].x, true,
+  'activity stacks LP-E cores in a column')
+assertEqual(pantherPaint.cells[15].y > pantherPaint.cells[12].y, true,
+  'activity spreads the LP-E column down the tall cache')
+assertEqual(Math.abs(pantherPaint.cells[4].x - pantherPaint.cells[0].x) < 1, true,
+  'activity does not place the leftmost E-core outside the P-core row')
+assertEqual(
+  Math.abs((pantherPaint.cells[7].x + pantherPaint.cells[7].size)
+    - (pantherPaint.cells[3].x + pantherPaint.cells[3].size)) < 1,
+  true,
+  'activity does not place the rightmost E-core outside the P-core row'
+)
+assertEqual(pantherPaint.cells[5].x > pantherPaint.cells[4].x, true,
+  'activity spreads E-cores between the P-core edges')
+const lpFrame = pantherPaint.frames[1]
+const lpMidX = pantherPaint.cells[12].x + pantherPaint.cells[12].size / 2
+assertEqual(Math.abs(lpMidX - (lpFrame.x + lpFrame.w / 2)) < 1, true,
+  'activity centers LP-E cores horizontally in the small cache')
+const lpTop = pantherPaint.cells[12].y - lpFrame.y
+const lpBottom = (lpFrame.y + lpFrame.h) - (pantherPaint.cells[15].y + pantherPaint.cells[15].size)
+assertEqual(Math.abs(lpTop - lpBottom) <= 1, true,
+  'activity centers the LP-E column vertically in the small cache')
+const paintedAgain = activity.paintCoreLayout(
+  usages(16).map(core => ({ name: core.name, usage: core.usage + 5 })),
+  panther,
+  { gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7 },
+  'live'
+)
+const paintedFirst = activity.paintCoreLayout(
+  usages(16),
+  panther,
+  { gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7 },
+  'live'
+)
+assertEqual(paintedFirst.cells[0].x, paintedAgain.cells[0].x,
+  'activity reuses die geometry when only usage changes')
+assertEqual(paintedFirst.frames, paintedAgain.frames,
+  'activity keeps cache-domain frames stable across usage samples')
+assertEqual(paintedAgain.cells[3].usage > paintedFirst.cells[3].usage, true,
+  'activity still refreshes per-core usage on a cached die')
+
+const meteor = []
+for (let i = 0; i < 6; i++) meteor.push(topo(i, 'performance', '0-13', String(i), i))
+for (let i = 6; i < 14; i++) meteor.push(topo(i, 'efficiency', '0-13', i < 10 ? '6-9' : '10-13', i))
+for (let i = 14; i < 16; i++) meteor.push(topo(i, 'lowpower', '14-15', '14-15', i))
+const meteorDie = activity.coreLayout(usages(16), meteor)
+assertEqual(meteorDie.domains[0].rows[0].cells.length, 6, 'activity keeps six Meteor Lake P-cores in one row')
+assertEqual(meteorDie.domains[1].rows[0].cells.length, 2, 'activity isolates Meteor Lake LP-E cores')
+const meteorPaint = activity.flattenCoreLayout(meteorDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+const meteorE = meteorPaint.cells.filter(cell => cell.kind === 'efficiency')
+assertEqual(meteorE.length, 8, 'activity paints eight Meteor Lake E-cores')
+assertEqual(meteorE.every(cell => cell.y === meteorE[0].y), true,
+  'activity keeps Meteor Lake E-cores on one row under six P-cores')
+
+const alder = []
+for (let i = 0; i < 16; i += 2) alder.push(topo(i, 'performance', '0-23', String(i), i), topo(i + 1, 'performance', '0-23', String(i), i))
+for (let i = 16; i < 20; i++) alder.push(topo(i, 'efficiency', '0-23', '16-19', i))
+for (let i = 20; i < 24; i++) alder.push(topo(i, 'efficiency', '0-23', '20-23', i))
+const alderDie = activity.coreLayout(usages(24), alder)
+assertEqual(alderDie.mode, 'die', 'activity specializes Alder Lake P+E')
+assertEqual(alderDie.domains.length, 1, 'activity keeps a single Alder Lake cache domain together')
+assertEqual(alderDie.domains[0].rows[0].cells.length, 8, 'activity collapses SMT siblings into one P-core cell')
+assertEqual(alderDie.domains[0].rows[0].cells[0].logicals.length, 2, 'activity tracks both threads inside a P-core cell')
+const alderPaint = activity.flattenCoreLayout(alderDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+const alderE = alderPaint.cells.filter(cell => cell.kind === 'efficiency')
+assertEqual(alderE.length, 8, 'activity paints eight Alder Lake E-cores')
+assertEqual(alderE.every(cell => cell.y === alderE[0].y), true,
+  'activity keeps Alder Lake E-cores on one row under eight P-cores')
+
+const raptor = []
+for (let i = 0; i < 6; i++) raptor.push(topo(i, 'performance', '0-13', String(i), i))
+for (let i = 6; i < 14; i++) raptor.push(topo(i, 'efficiency', '0-13', i < 10 ? '6-9' : '10-13', i))
+const raptorPaint = activity.flattenCoreLayout(activity.coreLayout(usages(14), raptor), {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+const raptorE = raptorPaint.cells.filter(cell => cell.kind === 'efficiency')
+assertEqual(raptorE.length, 8, 'activity paints eight Raptor Lake E-cores')
+assertEqual(raptorE.every(cell => cell.y === raptorE[0].y), true,
+  'activity keeps Raptor Lake E-cores on one row under six P-cores')
+
+const lunar = []
+for (let i = 0; i < 4; i++) lunar.push(topo(i, 'performance', '0-3', String(i), i))
+for (let i = 4; i < 8; i++) lunar.push(topo(i, 'lowpower', '4-7', '4-7', i))
+const lunarDie = activity.coreLayout(usages(8), lunar)
+assertEqual(lunarDie.domains.length, 2, 'activity splits Lunar Lake P-cores from LP-E')
+assertEqual(lunarDie.domains[0].rows[0].kind, 'performance', 'activity shows Lunar Lake P-cores as the primary square')
+
+const strix = []
+for (let i = 0; i < 4; i++) strix.push(topo(i, 'performance', '0-3', '0-3', i))
+for (let i = 4; i < 12; i++) strix.push(topo(i, 'efficiency', '4-11', '4-11', i))
+const strixDie = activity.coreLayout(usages(12), strix)
+assertEqual(strixDie.domains.length, 2, 'activity splits Strix Point Zen 5 and Zen 5c CCX squares')
+assertEqual(strixDie.domains[0].rows[0].cells.length, 4, 'activity shows four Zen 5 cores in the larger square')
+assertEqual(strixDie.domains[1].rows.length, 2, 'activity keeps Zen 5c cores as two rows in their CCX')
+assertEqual(strixDie.domains[1].rows[0].cells.length, 4, 'activity shows four Zen 5c cores per row')
+
+const arm = []
+for (let i = 0; i < 1; i++) arm.push(topo(i, 'performance', '0-7', '0', i))
+for (let i = 1; i < 4; i++) arm.push(topo(i, 'efficiency', '0-7', '1-3', i))
+for (let i = 4; i < 8; i++) arm.push(topo(i, 'lowpower', '0-7', '4-7', i))
+const armDie = activity.coreLayout(usages(8), arm)
+assertEqual(armDie.domains.length, 1, 'activity keeps a shared-DSU ARM cluster in one square')
+assertDeepEqual(armDie.domains[0].rows.map(row => row.kind + ':' + row.cells.length),
+  ['performance:1', 'efficiency:3', 'lowpower:4'],
+  'activity stacks ARM big.LITTLE tiers by class')
+const armPaint = activity.flattenCoreLayout(armDie, {
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+const armP = armPaint.cells.filter(cell => cell.kind === 'performance')
+const armE = armPaint.cells.filter(cell => cell.kind === 'efficiency')
+const armLp = armPaint.cells.filter(cell => cell.kind === 'lowpower')
+assertEqual(armP.length, 1, 'activity paints one ARM big core')
+assertEqual(armE.length, 3, 'activity paints three ARM middle cores')
+assertEqual(armLp.length, 4, 'activity paints four ARM little cores')
+assertEqual(armE.every(cell => cell.y === armE[0].y), true, 'activity keeps ARM middle cores on one row')
+assertEqual(armLp.every(cell => cell.y === armLp[0].y), true, 'activity keeps ARM little cores on one row')
+assertEqual(armE[0].y > armP[0].y, true, 'activity stacks ARM tiers with the big core on top')
+assertEqual(armLp[0].y > armE[0].y, true, 'activity stacks ARM little cores under the middle row')
+const armMid = armPaint.frames[0].x + armPaint.frames[0].w / 2
+assertEqual(Math.abs(armP[0].x + armP[0].size / 2 - armMid) < 1, true,
+  'activity centers the ARM big core over the shared DSU')
+assertEqual(Math.abs((armLp[0].x + armLp[3].x + armLp[3].size) / 2 - armMid) < 1, true,
+  'activity centers the ARM little-core row in the shared DSU')
+
+const uniform = Array.from({ length: 16 }, (_, i) => topo(i, 'performance', '0-15', String(i), i))
+assertEqual(activity.coreLayout(usages(16), uniform).mode, 'uniform',
+  'activity keeps a homogeneous desktop CPU on the regular grid')
+assertEqual(activity.coreLayout(usages(8), []).mode, 'uniform',
+  'activity falls back to the regular grid without topology')
+const catalog = activity.previewCoreCatalog({
+  gap: 2, domainGap: 4, pad: 2, performance: 9, efficiency: 6, same: 7
+})
+assertEqual(catalog.length >= 8, true, 'activity offers a review catalog of CPU layouts')
+assertDeepEqual(catalog.map(entry => entry.id), [
+  'panther-16', 'panther-8', 'meteor-16', 'alder-24', 'raptor-14',
+  'strix-12', 'arm-8', 'oryon-12', 'desktop-16'
+], 'activity previews the researched hybrid and homogeneous layouts')
+assertEqual(catalog[0].paint.frames.length, 2, 'activity catalog paints the Panther Lake die')
+assertEqual(catalog[7].mode, 'uniform', 'activity catalog keeps Snapdragon X Elite on the regular grid')
+
+const parsedTopo = activity.parseSnapshot([
+  'schema\tactivity-resources\t1',
+  'sample\t1',
+  'cpu-topo\t0\tperformance\t0-11\t0\t0\t4800000',
+  'cpu-topo\t4\tefficiency\t0-11\t4-7\t4\t3700000',
+  'cpu-topo\t12\tlowpower\t12-15\t12-15\t12\t3300000',
+  ''
+].join('\n'))
+assertEqual(parsedTopo.topology.length, 3, 'activity parses cpu-topo lines into the resource snapshot')
+assertEqual(parsedTopo.topology[2].cls, 'lowpower', 'activity preserves LP-E classification')
+
 const manifest = requireFromRoot('manifest.json')
 const settingKeys = manifest.barWidget.schema.map(entry => entry.key)
 assertDeepEqual(
@@ -180,6 +369,55 @@ grep -Eq '^memory[[:space:]]' <<<"$snapshot" || fail "activity collector emits m
 grep -Eq '^network[[:space:]]' <<<"$snapshot" || fail "activity collector emits network counters"
 grep -Eq '^disk[[:space:]]' <<<"$snapshot" || fail "activity collector emits disk counters"
 pass "activity collector emits the resource snapshot contract"
+
+write_cpu_topo() {
+  local sys="$1" id="$2" core="$3" cluster="$4" l2="$5" l3="$6" khz="$7"
+  local cpu="$sys/devices/system/cpu/cpu$id"
+  mkdir -p "$cpu/topology" "$cpu/cache/index2" "$cpu/cpufreq"
+  printf '%s\n' "$core" >"$cpu/topology/core_id"
+  printf '%s\n' "$cluster" >"$cpu/topology/cluster_cpus_list"
+  printf '2\n' >"$cpu/cache/index2/level"
+  printf 'Unified\n' >"$cpu/cache/index2/type"
+  printf '%s\n' "$l2" >"$cpu/cache/index2/shared_cpu_list"
+  if [[ -n $l3 ]]; then
+    mkdir -p "$cpu/cache/index3"
+    printf '3\n' >"$cpu/cache/index3/level"
+    printf 'Unified\n' >"$cpu/cache/index3/type"
+    printf '%s\n' "$l3" >"$cpu/cache/index3/shared_cpu_list"
+  fi
+  printf '%s\n' "$khz" >"$cpu/cpufreq/cpuinfo_max_freq"
+}
+
+topo_root=$(mktemp -d)
+mkdir -p "$topo_root/sys/devices/cpu_core" "$topo_root/sys/devices/cpu_atom"
+printf '0-3\n' >"$topo_root/sys/devices/cpu_core/cpus"
+printf '4-15\n' >"$topo_root/sys/devices/cpu_atom/cpus"
+for id in 0 1 2 3; do
+  write_cpu_topo "$topo_root/sys" "$id" "$id" "$id" "$id" "0-11" 4800000
+done
+for id in 4 5 6 7; do
+  write_cpu_topo "$topo_root/sys" "$id" "$id" "4-7" "4-7" "0-11" 3700000
+done
+for id in 8 9 10 11; do
+  write_cpu_topo "$topo_root/sys" "$id" "$id" "8-11" "8-11" "0-11" 3700000
+done
+for id in 12 13 14 15; do
+  write_cpu_topo "$topo_root/sys" "$id" "$id" "12-15" "12-15" "" 3300000
+done
+topo_snapshot=$(
+  OMARCHY_SYSTEM_STATS_SYS_PATH="$topo_root/sys" \
+    "$ROOT/activity-stats" --activity-resources
+)
+rm -rf -- "$topo_root"
+[[ $(grep -c $'^cpu-topo\t' <<<"$topo_snapshot") -eq 16 ]] ||
+  fail "activity collector does not emit a topology row for every logical CPU"
+[[ $(grep -c $'^cpu-topo\t[0-9]\tperformance\t0-11\t' <<<"$topo_snapshot") -eq 4 ]] ||
+  fail "activity collector does not classify Intel P-cores"
+[[ $(grep -c $'\tefficiency\t0-11\t' <<<"$topo_snapshot") -eq 8 ]] ||
+  fail "activity collector does not classify Intel E-cores that share the P-core L3"
+[[ $(grep -c $'\tlowpower\t12-15\t' <<<"$topo_snapshot") -eq 4 ]] ||
+  fail "activity collector does not isolate LP-E cores without that L3"
+pass "activity collector classifies hybrid CPU cache domains"
 
 gpu_snapshot=$("$ROOT/activity-stats" --activity-gpus)
 grep -Eq '^schema[[:space:]]+activity-gpus[[:space:]]+1$' <<<"$gpu_snapshot" ||
@@ -297,15 +535,11 @@ grep -Fq 'implicitHeight: button.implicitHeight' "$ROOT/Panel.qml" ||
 pass "activity bar widget exposes its icon geometry"
 
 grep -Fq 'id: headerActions' "$ROOT/Panel.qml" ||
-  fail "activity temperature and expand controls do not share a header row"
+  fail "activity header actions do not share a header row"
 grep -A3 -F 'id: headerActions' "$ROOT/Panel.qml" |
   grep -Fq 'anchors.verticalCenter: parent.verticalCenter' ||
   fail "activity header controls are not vertically centered together"
-pass "activity temperature aligns with the header action"
-
-grep -Fq 'implicitHeight: expandButton.implicitHeight' "$ROOT/Panel.qml" ||
-  fail "activity temperature does not match the expand button height"
-pass "activity temperature matches the expand button height"
+pass "activity header actions stay aligned"
 
 panel_file="$ROOT/Panel.qml"
 controller_file="$ROOT/ActivityController.qml"
@@ -313,27 +547,37 @@ action_controller_file="$ROOT/ProcessActionController.qml"
 if grep -Eq 'label: "LOAD"|detail: .*"LOAD ' "$panel_file"; then
   fail "activity panel exposes the Linux load average"
 fi
-grep -Fq 'root.snapshot.cores.length + " LOGICAL CPUS"' "$panel_file" ||
-  fail "activity panel does not replace load with a logical CPU count"
-pass "activity uses a plain logical CPU count instead of load average"
+if grep -Fq 'LOGICAL CPUS' "$panel_file"; then
+  fail "activity panel still advertises logical CPU count as card filler"
+fi
+grep -Fq 'function cpuCardDetail()' "$panel_file" &&
+  grep -Fq 'Model.formatTemperature(cpuTemperature.value, temperatureUnitSetting)' "$panel_file" ||
+  fail "activity CPU card does not own the CPU temperature"
+if grep -Fq 'component TemperatureBadge' "$panel_file"; then
+  fail "activity temperature still lives in the header"
+fi
+pass "activity keeps CPU temperature on the CPU card"
 
-grep -Fq 'text: "DISK STORAGE"' "$panel_file" ||
+grep -Fq 'label: "Storage"' "$panel_file" ||
   fail "activity expanded details do not show disk storage"
-grep -Fq 'text: root.gpuHeadingText()' "$panel_file" &&
-  grep -Fq 'items.push({ label: "USAGE", value: gpuUsageText(adapters[0]) })' "$panel_file" ||
+grep -Fq 'label: root.gpuHeadingText()' "$panel_file" &&
+  grep -Fq 'gpuUsageText(adapters[0])' "$panel_file" ||
   fail "activity expanded details do not show GPU adapters"
-grep -Fq 'return "SHARED"' "$panel_file" ||
+grep -Fq 'return "Shared"' "$panel_file" ||
   fail "activity panel does not distinguish integrated shared GPU memory"
 grep -Fq 'return "VRAM"' "$panel_file" ||
   fail "activity panel does not label dedicated GPU memory"
-grep -Fq 'text: "USED"' "$panel_file" ||
-  fail "activity storage details do not show used storage"
-grep -Fq 'text: "REMAINING"' "$panel_file" ||
-  fail "activity storage details do not show remaining storage"
+grep -Fq 'function storageCardValue()' "$panel_file" &&
+  grep -Fq 'function storageCardDetail()' "$panel_file" &&
+  grep -Fq '" free"' "$panel_file" ||
+  fail "activity storage card does not show used storage and free space"
 if grep -Fq 'POWER & THERMALS' "$panel_file"; then
   fail "activity expanded details still show power and thermals"
 fi
-pass "activity replaces power and thermals with disk capacity"
+if grep -Fq 'label: "RAM TOTAL"' "$panel_file" || grep -Fq 'label: "CORES"' "$panel_file"; then
+  fail "activity GPU card is still padded with unrelated system facts"
+fi
+pass "activity shows GPU and storage without filler metrics"
 
 grep -Fq 'ActivityController {' "$panel_file" &&
   grep -Fq 'active: root.opened' "$panel_file" &&
@@ -399,9 +643,9 @@ if grep -Fq '    _snapshot = Model.emptySnapshot()' "$controller_file" ||
 fi
 pass "activity controller coalesces deadlines and refreshes retained values without blanking"
 
-grep -Fq 'text: "EST. W"' "$panel_file" ||
+grep -Fq 'label: "~W"' "$panel_file" ||
   fail "activity process table does not label estimated CPU watts"
-grep -Fq 'root.measuredPackagePowerText(root.processPower.watts) + " PACKAGE · "' "$panel_file" ||
+grep -Fq 'measuredPackagePowerText(processPower.watts)' "$panel_file" ||
   fail "activity CPU summary does not expose measured total CPU-package power"
 grep -Fq 'return "~" + watts.toFixed' "$panel_file" ||
   fail "activity process watts are not visibly marked as estimates"
@@ -422,22 +666,46 @@ grep -Fq 'Model.formatBytes(snapshot.memory.cached)' "$panel_file" ||
   fail "activity panel does not place CPU frequency in both card headings"
 grep -Fq 'function memoryBreakdownText()' "$panel_file" &&
   grep -Fq 'if (usedUnit && usedUnit === cacheUnit)' "$panel_file" &&
-  grep -Fq '" · CACHE " + cacheText' "$panel_file" ||
+  grep -Fq '" · cache " + cacheText' "$panel_file" ||
   fail "activity RAM card does not show used memory and cache together"
 grep -Fq 'snapshot.memorySpeedMTs, "MT/s"' "$panel_file" &&
   grep -Fq 'snapshot.cpuFrequencyMHz, "MHz"' "$panel_file" &&
   grep -Fq 'var frequency = gpuFrequencyText(adapters[0])' "$panel_file" &&
   grep -Fq 'if (frequency === 0) return "IDLE"' "$panel_file" ||
   fail "activity card headings do not distinguish DDR transfer rate from CPU and GPU clocks"
-grep -Fq 'label: "RAM TOTAL"' "$panel_file" ||
-  fail "activity system details do not retain total RAM"
-grep -Fq 'label: "CORES"' "$panel_file" ||
-  fail "activity system details lose the logical core count"
-grep -Fq 'badge: root.swapBadgeText()' "$panel_file" &&
-  grep -Fq 'return snapshot.memory.swapTotal ? "SWAP " + percentText(metrics.swap) : "NO SWAP"' "$panel_file" ||
-  fail "activity disk card does not expose swap usage"
-if grep -Fq 'label: "SWAP"' "$panel_file"; then
-  fail "activity system details still contain the displaced swap reading"
+[[ $(grep -Fc 'badge: root.swapBadgeText()' "$panel_file") -eq 2 ]] &&
+  grep -Fq 'return "Swap " + percentText(metrics.swap)' "$panel_file" ||
+  fail "activity RAM cards do not expose swap usage"
+if grep -Fq 'label: "DISK"' "$panel_file"; then
+  fail "activity disk card still shouts its heading"
+fi
+if grep -Fq 'component CoreLine' "$panel_file"; then
+  fail "activity still draws a labeled bar for every logical core"
+fi
+grep -Fq 'component CoreHeatGrid' "$panel_file" &&
+  grep -Fq 'paint: root.corePaintCompact' "$panel_file" &&
+  grep -Fq 'paint: root.corePaintExpanded' "$panel_file" &&
+  grep -Fq 'corePaintSizesExpanded' "$panel_file" &&
+  grep -Fq 'id: coreDie' "$panel_file" ||
+  fail "activity does not draw per-core load as a die on the CPU card"
+if grep -Fq 'text: "Cores"' "$panel_file"; then
+  fail "activity still treats cores as a separate strip under the cards"
+fi
+grep -Fq 'component ProcessSortCell' "$panel_file" &&
+  grep -Fq 'sortKey: "cpu"' "$panel_file" &&
+  grep -Fq 'sortKey: "runtime"' "$panel_file" ||
+  fail "activity process column headers are not the sort controls"
+if grep -Fq 'text: "More details"' "$panel_file"; then
+  fail "activity compact view still duplicates the expand control"
+fi
+grep -Fq 'property bool hintsVisible: false' "$panel_file" &&
+  grep -Fq 'function shortcutHintText()' "$panel_file" ||
+  fail "activity keyboard hints are not opt-in"
+if grep -Fq 'Preview CPU layouts' "$panel_file" || grep -Fq 'layoutPreviewContent' "$panel_file"; then
+  fail "activity still ships the CPU layout preview in the production panel"
+fi
+if grep -Fq 'label: "GPU"' "$panel_file"; then
+  fail "activity compact view still shows a GPU row"
 fi
 grep -Fq 'id: settingsContent' "$panel_file" &&
   grep -Fq 'label: "Update speed"' "$panel_file" &&

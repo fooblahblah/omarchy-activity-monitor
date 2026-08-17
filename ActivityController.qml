@@ -323,6 +323,8 @@ Item {
   function consumeSnapshot(raw) {
     var next = Model.parseSnapshot(raw)
     if (next.schema !== 1 || next.sample <= 0) return
+    if (Model.sameTopology(_snapshot.topology, next.topology))
+      next.topology = _snapshot.topology
     if (_previousSnapshot.sample <= 0) {
       _metrics = Model.baselineMetrics(next, metrics)
       _previousSnapshot = next

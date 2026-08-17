@@ -16,6 +16,7 @@ Panel {
   property bool expanded: false
   property bool settingsOpen: false
   property bool settingsControlActive: false
+  property bool hintsVisible: false
   property bool cursorActive: false
   property int selectedProcessIndex: 0
   property string selectedProcessKey: ""
@@ -55,6 +56,30 @@ Panel {
   readonly property real storageUsedFraction: storageSnapshot.total > 0
     ? Math.max(0, Math.min(1, storageSnapshot.used / storageSnapshot.total))
     : 0
+  readonly property int dieGapCompact: Style.space(2)
+  readonly property int dieGapExpanded: Style.space(3)
+  readonly property var corePaintSizesCompact: ({
+    gap: dieGapCompact,
+    domainGap: Style.space(4),
+    pad: Style.space(3),
+    performance: Style.space(10),
+    efficiency: Style.space(7),
+    same: Style.space(7)
+  })
+  readonly property var corePaintSizesExpanded: ({
+    gap: dieGapExpanded,
+    domainGap: Style.space(6),
+    pad: Style.space(5),
+    performance: Style.space(16),
+    efficiency: Style.space(11),
+    same: Style.space(11)
+  })
+  readonly property var corePaintCompact: expanded
+    ? Model.emptyCorePaint()
+    : Model.paintCoreLayout(metrics.cores, snapshot.topology, corePaintSizesCompact, "compact")
+  readonly property var corePaintExpanded: expanded
+    ? Model.paintCoreLayout(metrics.cores, snapshot.topology, corePaintSizesExpanded, "expanded")
+    : Model.emptyCorePaint()
   readonly property var sortedProcesses: expanded
     ? Model.filterAndSortProcesses(processes, processQuery, sortKey, sortAscending)
     : []
@@ -64,7 +89,6 @@ Panel {
   readonly property var selectedProcess: sortedProcesses.length > 0
     ? sortedProcesses[Math.max(0, Math.min(selectedProcessIndex, sortedProcesses.length - 1))]
     : null
-  readonly property var gpuDetailItems: buildGpuDetailItems()
   readonly property string samplingSpeedSetting: normalizedSamplingSpeed(setting("samplingSpeed", "Balanced"))
   readonly property int historySamplesSetting: Math.max(20, Math.min(240,
     Math.round(Number(setting("historySamples", 60)) || 60)))
@@ -83,7 +107,10 @@ Panel {
     cursorActive = false
     selectedProcessIndex = 0
     selectedProcessKey = ""
-    if (!expanded) processQuery = ""
+    if (!expanded) {
+      processQuery = ""
+      hintsVisible = false
+    }
     if (!expanded && sortKey === "power") {
       sortKey = "cpu"
       sortAscending = false
@@ -231,12 +258,12 @@ Panel {
   }
 
   function swapBadgeText() {
-    if (!hasSnapshot) return "SWAP —"
-    return snapshot.memory.swapTotal ? "SWAP " + percentText(metrics.swap) : "NO SWAP"
+    if (!hasSnapshot || !snapshot.memory.swapTotal) return ""
+    return "Swap " + percentText(metrics.swap)
   }
 
   function memoryBreakdownText() {
-    if (!snapshot.memory.total) return "USED — · CACHE —"
+    if (!snapshot.memory.total) return "used — · cache —"
     var usedText = Model.formatBytes(snapshot.memory.total - snapshot.memory.available)
     var cacheText = Model.formatBytes(snapshot.memory.cached)
     var usedSeparator = usedText.lastIndexOf(" ")
@@ -244,7 +271,18 @@ Panel {
     var usedUnit = usedSeparator >= 0 ? usedText.slice(usedSeparator + 1) : ""
     var cacheUnit = cacheSeparator >= 0 ? cacheText.slice(cacheSeparator + 1) : ""
     if (usedUnit && usedUnit === cacheUnit) usedText = usedText.slice(0, usedSeparator)
-    return "USED " + usedText + " · CACHE " + cacheText
+    return "used " + usedText + " · cache " + cacheText
+  }
+
+  function cpuCardDetail() {
+    var parts = []
+    if (cpuTemperature)
+      parts.push(Model.formatTemperature(cpuTemperature.value, temperatureUnitSetting))
+    if (powerEstimatesEnabled && processPower.available) {
+      var watts = measuredPackagePowerText(processPower.watts)
+      if (watts) parts.push(watts)
+    }
+    return parts.join(" · ")
   }
 
   function frequencyText(value, unit) {
@@ -285,18 +323,18 @@ Panel {
   function gpuHeadingText() {
     var adapters = Array.isArray(gpus) ? gpus : []
     if (adapters.length === 0) return "GPU"
-    if (adapters.length > 1) return "GPU · " + adapters.length + " ADAPTERS"
+    if (adapters.length > 1) return "GPU · " + adapters.length + " adapters"
     var name = compactGpuName(adapters[0])
     var bracketed = name.match(/\[([^\]]+)\]/g)
     if (bracketed && bracketed.length > 0)
       name = bracketed[bracketed.length - 1].slice(1, -1)
     var frequency = gpuFrequencyText(adapters[0])
-    return "GPU · " + name.toUpperCase() + (frequency ? " · " + frequency : "")
+    return "GPU · " + name + (frequency ? " · " + frequency : "")
   }
 
   function gpuUsageText(gpu) {
     var usage = Number(gpu && gpu.usage)
-    return isFinite(usage) && usage >= 0 ? Math.round(usage) + "%" : "SAMPLING"
+    return isFinite(usage) && usage >= 0 ? Math.round(usage) + "%" : "Sampling"
   }
 
   function gpuUsageAndClockText(gpu) {
@@ -306,15 +344,15 @@ Panel {
   }
 
   function gpuMemoryLabel(gpu) {
-    if (gpu && gpu.memoryKind === "shared") return "SHARED"
+    if (gpu && gpu.memoryKind === "shared") return "Shared"
     if (gpu && gpu.memoryKind === "vram") return "VRAM"
-    return "MEMORY"
+    return "Memory"
   }
 
   function gpuMemoryText(gpu) {
     var used = Number(gpu && gpu.memoryUsed)
     var total = Number(gpu && gpu.memoryTotal)
-    if (!isFinite(used) || used < 0) return "UNAVAILABLE"
+    if (!isFinite(used) || used < 0) return "Unavailable"
     var usedText = Model.formatBytes(used)
     if (!isFinite(total) || total <= 0) return usedText
     var totalText = Model.formatBytes(total)
@@ -326,45 +364,43 @@ Panel {
     return usedText + " / " + totalText
   }
 
-  function buildGpuDetailItems() {
-    var items = []
+  function primaryGpuUsage() {
     var adapters = Array.isArray(gpus) ? gpus : []
-    if (gpuSnapshot.sample <= 0) {
-      items.push({ label: "STATUS", value: "DETECTING…" })
-    } else if (adapters.length === 0) {
-      items.push({ label: "STATUS", value: "NOT DETECTED" })
-    } else if (adapters.length === 1) {
-      items.push({ label: "USAGE", value: gpuUsageText(adapters[0]) })
-      items.push({ label: gpuMemoryLabel(adapters[0]), value: gpuMemoryText(adapters[0]) })
-    } else {
-      for (var i = 0; i < Math.min(2, adapters.length); i++) {
-        var gpu = adapters[i]
-        items.push({
-          label: String(gpu.vendor || "GPU").toUpperCase(),
-          value: gpuUsageAndClockText(gpu)
-        })
-        items.push({ label: gpuMemoryLabel(gpu), value: gpuMemoryText(gpu) })
-      }
-      if (adapters.length > 2)
-        items[items.length - 1] = { label: "ADAPTERS", value: "2 OF " + adapters.length + " SHOWN" }
-    }
+    if (adapters.length === 0) return -1
+    var usage = Number(adapters[0].usage)
+    return isFinite(usage) ? usage : -1
+  }
 
-    var systemItems = [
-      {
-        label: "RAM TOTAL",
-        value: snapshot.memory.total ? Model.formatBytes(snapshot.memory.total) : "—"
-      },
-      {
-        label: "CORES",
-        value: snapshot.cores.length ? snapshot.cores.length + " LOGICAL" : "—"
-      },
-      {
-        label: "TASKS",
-        value: snapshot.tasks.running + "/" + snapshot.tasks.total
-      }
-    ]
-    for (var j = 0; items.length < 4 && j < systemItems.length; j++) items.push(systemItems[j])
-    return items.slice(0, 4)
+  function primaryGpuUsageText() {
+    var adapters = Array.isArray(gpus) ? gpus : []
+    if (gpuSnapshot.sample <= 0) return "…"
+    if (adapters.length === 0) return "—"
+    return gpuUsageText(adapters[0])
+  }
+
+  function gpuCardDetail() {
+    var adapters = Array.isArray(gpus) ? gpus : []
+    if (adapters.length === 0)
+      return gpuSnapshot.sample <= 0 ? "Detecting" : "Not detected"
+    if (adapters.length === 1)
+      return gpuMemoryLabel(adapters[0]) + " " + gpuMemoryText(adapters[0])
+    var parts = []
+    for (var i = 0; i < Math.min(2, adapters.length); i++)
+      parts.push(compactGpuName(adapters[i]) + " " + gpuUsageAndClockText(adapters[i]))
+    if (adapters.length > 2) parts.push(adapters.length + " adapters")
+    return parts.join(" · ")
+  }
+
+  function storageCardValue() {
+    return storageSnapshot.sample > 0
+      ? Model.formatBytes(storageSnapshot.used)
+      : "—"
+  }
+
+  function storageCardDetail() {
+    return storageSnapshot.sample > 0
+      ? Model.formatBytes(storageSnapshot.available) + " free"
+      : ""
   }
 
   function pressureColor(value) {
@@ -391,6 +427,12 @@ Panel {
   function sortLabel(key, label) {
     if (sortKey !== key) return label
     return label + (sortAscending ? " ↑" : " ↓")
+  }
+
+  function shortcutHintText() {
+    return "e collapse  ·  / search  ·  "
+      + (powerEstimatesEnabled ? "c/m/w/p/t/n" : "c/m/p/t/n")
+      + " sort  ·  r refresh  ·  s settings  ·  j/k select  ·  x end app  ·  ? hide"
   }
 
   function selectProcessFromPointer(index, item, mouse) {
@@ -446,10 +488,12 @@ Panel {
       selectedProcessIndex = 0
       selectedProcessKey = ""
       processQuery = ""
+      hintsVisible = false
     } else {
       expanded = false
       settingsOpen = false
       settingsControlActive = false
+      hintsVisible = false
       processQuery = ""
     }
   }
@@ -549,6 +593,7 @@ Panel {
         if (processActions.confirmationOpen) return
         var key = String(text || "").toLowerCase()
         if (key === "s") root.setSettingsOpen(!root.settingsOpen)
+        else if (key === "?") root.hintsVisible = !root.hintsVisible
         else if (root.settingsOpen) return
         else if (key === "e") root.setExpanded(!root.expanded)
         else if (key === "r") root.refresh()
@@ -623,7 +668,8 @@ Panel {
           width: (parent.width - parent.spacing) / 2
           label: root.cpuCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.cpu) : "—"
-          detail: root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL CPUS" : "CPU TOTAL"
+          detail: root.cpuCardDetail()
+          paint: root.corePaintCompact
           history: root.metrics.cpuHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.cpu)
@@ -634,6 +680,10 @@ Panel {
           label: root.memoryCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.memoryBreakdownText()
+          badge: root.swapBadgeText()
+          badgeTone: root.snapshot.memory.swapTotal
+            ? root.pressureColor(root.metrics.swap)
+            : root.dim
           history: root.metrics.memoryHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.memory)
@@ -671,7 +721,7 @@ Panel {
         spacing: Style.spacing.sm
 
         PanelSectionHeader {
-          text: "BUSIEST PROCESSES"
+          text: "Busiest"
           foreground: root.foreground
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         }
@@ -696,15 +746,14 @@ Panel {
         }
       }
 
-      Button {
+      Text {
         width: parent.width
-        iconText: "\uf065"
-        text: "More details"
-        foreground: root.foreground
-        accent: root.accent
-        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-        bordered: true
-        onClicked: root.setExpanded(true)
+        visible: root.hintsVisible
+        text: "e details  ·  s settings  ·  ? hide"
+        color: root.dim
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
       }
     }
   }
@@ -745,7 +794,7 @@ Panel {
           spacing: Style.spacing.md
 
           PanelSectionHeader {
-            text: "ACTIVITY SETTINGS"
+            text: "Settings"
             foreground: root.foreground
             fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
           }
@@ -902,17 +951,16 @@ Panel {
       Grid {
         id: summaryGrid
         width: parent.width
-        columns: width >= Style.space(640) ? 4 : 2
+        columns: width >= Style.space(640) ? 3 : 2
         spacing: Style.spacing.md
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
           label: root.cpuCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.cpu) : "—"
-          detail: root.powerEstimatesEnabled && root.processPower.available
-            ? root.measuredPackagePowerText(root.processPower.watts) + " PACKAGE · "
-              + (root.snapshot.cores.length ? root.snapshot.cores.length + " CPUS" : "CPU TOTAL")
-            : (root.snapshot.cores.length ? root.snapshot.cores.length + " LOGICAL CPUS" : "CPU TOTAL")
+          detail: root.cpuCardDetail()
+          paint: root.corePaintExpanded
+          tall: true
           history: root.metrics.cpuHistory
           ceiling: 100
           tone: root.pressureColor(root.metrics.cpu)
@@ -923,216 +971,55 @@ Panel {
           label: root.memoryCardLabel()
           value: root.hasSnapshot ? root.percentText(root.metrics.memory) : "—"
           detail: root.memoryBreakdownText()
+          badge: root.swapBadgeText()
+          badgeTone: root.snapshot.memory.swapTotal
+            ? root.pressureColor(root.metrics.swap)
+            : root.dim
           history: root.metrics.memoryHistory
           ceiling: 100
+          tall: true
           tone: root.pressureColor(root.metrics.memory)
         }
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "NETWORK"
-          value: Model.formatBytes(root.metrics.download, "/s")
-          detail: "\uf093  " + Model.formatBytes(root.metrics.upload, "/s")
-          history: root.metrics.networkHistory
-          tone: root.accent
+          label: root.gpuHeadingText()
+          value: root.primaryGpuUsageText()
+          detail: root.gpuCardDetail()
+          tone: root.primaryGpuUsage() >= 0
+            ? root.pressureColor(root.primaryGpuUsage())
+            : root.accent
+          tall: true
         }
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "DISK"
-          badge: root.swapBadgeText()
-          badgeTone: root.snapshot.memory.swapTotal
-            ? root.pressureColor(root.metrics.swap)
-            : root.dim
+          label: "Network"
+          value: Model.formatBytes(root.metrics.download, "/s")
+          detail: "\uf093  " + Model.formatBytes(root.metrics.upload, "/s")
+          history: root.metrics.networkHistory
+          tone: root.accent
+          tall: true
+        }
+
+        MetricCard {
+          width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
+          label: "Disk"
           value: Model.formatBytes(root.metrics.diskRead, "/s")
           detail: "\uf093  " + Model.formatBytes(root.metrics.diskWrite, "/s")
           history: root.metrics.diskHistory
           tone: root.accent
-        }
-      }
-
-      Row {
-        width: parent.width
-        spacing: Style.spacing.md
-
-        DetailSurface {
-          id: cpuCoresSurface
-          width: (parent.width - parent.spacing) / 2
-          height: Math.max(
-            Style.space(164),
-            cpuCoresContent.implicitHeight + Style.spacing.xl * 2
-          )
-
-          Column {
-            id: cpuCoresContent
-            anchors.fill: parent
-            anchors.margins: Style.spacing.xl
-            spacing: Style.spacing.sm
-
-            PanelSectionHeader {
-              text: "CPU CORES"
-              foreground: root.foreground
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-            }
-
-            Grid {
-              width: parent.width
-              columns: 2
-              columnSpacing: Style.spacing.xl
-              rowSpacing: Style.spacing.xs
-
-              Repeater {
-                model: root.metrics.cores.slice(0, 16)
-
-                CoreLine {
-                  required property var modelData
-                  width: (parent.width - parent.columnSpacing) / 2
-                  coreData: modelData
-                }
-              }
-            }
-
-            Text {
-              visible: root.metrics.cores.length > 16
-              text: "+" + (root.metrics.cores.length - 16) + " more logical cores"
-              color: root.dim
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-          }
+          tall: true
         }
 
-        Column {
-          width: (parent.width - parent.spacing) / 2
-          height: cpuCoresSurface.height
-          spacing: Style.spacing.md
-
-          DetailSurface {
-            width: parent.width
-            height: (parent.height - parent.spacing) / 2
-
-            Column {
-              anchors.fill: parent
-              anchors.margins: Style.spacing.lg
-              spacing: Style.spacing.labelGap
-
-              PanelSectionHeader {
-                text: root.gpuHeadingText()
-                foreground: root.foreground
-                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-              }
-
-              Grid {
-                id: systemDetails
-                width: parent.width
-                columns: 2
-                columnSpacing: Style.spacing.xl
-                rowSpacing: Style.spacing.xxs
-
-                Repeater {
-                  model: root.gpuDetailItems
-
-                  DetailLine {
-                    required property var modelData
-                    width: (systemDetails.width - systemDetails.columnSpacing) / 2
-                    label: modelData.label
-                    value: modelData.value
-                  }
-                }
-              }
-
-            }
-          }
-
-          DetailSurface {
-            width: parent.width
-            height: (parent.height - parent.spacing) / 2
-
-            Column {
-              anchors.fill: parent
-              anchors.margins: Style.spacing.lg
-              spacing: Style.spacing.labelGap
-
-              PanelSectionHeader {
-                text: "DISK STORAGE"
-                foreground: root.foreground
-                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-              }
-
-              Row {
-                width: parent.width
-                spacing: Style.spacing.xl
-
-                Column {
-                  width: (parent.width - parent.spacing) / 2
-                  spacing: Style.spacing.xxs
-
-                  Text {
-                    width: parent.width
-                    text: "USED"
-                    color: root.dim
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: root.storageSnapshot.sample > 0
-                      ? Model.formatBytes(root.storageSnapshot.used)
-                      : "—"
-                    color: root.foreground
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                    elide: Text.ElideRight
-                  }
-                }
-
-                Column {
-                  width: (parent.width - parent.spacing) / 2
-                  spacing: Style.spacing.xxs
-
-                  Text {
-                    width: parent.width
-                    text: "REMAINING"
-                    color: root.dim
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    horizontalAlignment: Text.AlignRight
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: root.storageSnapshot.sample > 0
-                      ? Model.formatBytes(root.storageSnapshot.available)
-                      : "—"
-                    color: root.foreground
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                    elide: Text.ElideLeft
-                    horizontalAlignment: Text.AlignRight
-                  }
-                }
-              }
-
-              Rectangle {
-                width: parent.width
-                height: Style.space(4)
-                radius: height / 2
-                color: Util.alpha(root.foreground, 0.12)
-
-                Rectangle {
-                  width: parent.width * root.storageUsedFraction
-                  height: parent.height
-                  radius: parent.radius
-                  color: root.accent
-                }
-              }
-            }
-          }
+        MetricCard {
+          width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
+          label: "Storage"
+          value: root.storageCardValue()
+          detail: root.storageCardDetail()
+          bar: root.storageSnapshot.sample > 0 ? root.storageUsedFraction : -1
+          tone: root.pressureColor(root.storageUsedFraction * 100)
+          tall: true
         }
       }
 
@@ -1146,17 +1033,15 @@ Panel {
         spacing: Style.spacing.sm
 
         PanelSectionHeader {
-          text: "PROCESSES"
+          text: "Processes"
           foreground: root.foreground
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
           anchors.verticalCenter: parent.verticalCenter
         }
 
         Item {
-          width: Math.max(0, parent.width - parent.children[0].implicitWidth - searchBox.width
-            - cpuSort.implicitWidth - memorySort.implicitWidth
-            - (root.powerEstimatesEnabled ? powerSort.implicitWidth : 0)
-            - pidSort.implicitWidth - parent.spacing * (root.powerEstimatesEnabled ? 6 : 5))
+          width: Math.max(0, parent.width - parent.children[0].implicitWidth
+            - searchBox.width - parent.spacing * 2)
           height: 1
         }
 
@@ -1187,60 +1072,6 @@ Panel {
           }
           Component.onDestruction: if (root.searchField === searchBox) root.searchField = null
         }
-
-        Button {
-          id: cpuSort
-          text: root.sortLabel("cpu", "CPU")
-          selected: root.sortKey === "cpu"
-          foreground: root.foreground
-          accent: root.accent
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          fontSize: Style.font.caption
-          horizontalPadding: Style.spacing.md
-          verticalPadding: Style.spacing.sm
-          onClicked: root.setSort("cpu")
-        }
-
-        Button {
-          id: memorySort
-          text: root.sortLabel("memory", "RAM")
-          selected: root.sortKey === "memory"
-          foreground: root.foreground
-          accent: root.accent
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          fontSize: Style.font.caption
-          horizontalPadding: Style.spacing.md
-          verticalPadding: Style.spacing.sm
-          onClicked: root.setSort("memory")
-        }
-
-        Button {
-          id: powerSort
-          visible: root.powerEstimatesEnabled
-          text: root.sortLabel("power", "EST. W")
-          selected: root.sortKey === "power"
-          tooltipText: root.processPowerTooltip
-          foreground: root.processPower.available ? root.foreground : root.dim
-          accent: root.accent
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          fontSize: Style.font.caption
-          horizontalPadding: Style.spacing.md
-          verticalPadding: Style.spacing.sm
-          onClicked: root.setSort("power")
-        }
-
-        Button {
-          id: pidSort
-          text: root.sortLabel("pid", "PID")
-          selected: root.sortKey === "pid"
-          foreground: root.foreground
-          accent: root.accent
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          fontSize: Style.font.caption
-          horizontalPadding: Style.spacing.md
-          verticalPadding: Style.spacing.sm
-          onClicked: root.setSort("pid")
-        }
       }
 
       ProcessHeader {
@@ -1249,7 +1080,7 @@ Panel {
 
       Item {
         width: parent.width
-        height: Style.space(190)
+        height: Style.space(300)
         clip: true
 
         ListView {
@@ -1298,31 +1129,20 @@ Panel {
         }
       }
 
-      Row {
-        x: Style.spacing.md
-        width: Math.max(0, parent.width - Style.spacing.md * 2)
-        spacing: Style.spacing.md
-
-        DetailLine {
-          width: Math.max(0, parent.width - (endProcessButton.visible
-            ? endProcessButton.implicitWidth + parent.spacing : 0))
-          anchors.verticalCenter: parent.verticalCenter
-          label: root.selectedProcess ? root.selectedProcess.name + "  ·  PID " + root.selectedProcess.pid : "No process selected"
-          value: root.selectedProcess
-            ? root.selectedProcess.user + "  ·  " + root.selectedProcess.state + "  ·  "
-              + Model.formatBytes(root.selectedProcess.rss) + "  ·  " + Model.formatDuration(root.selectedProcess.elapsed)
-            : ""
-        }
+      Item {
+        width: parent.width
+        height: endProcessButton.visible ? endProcessButton.implicitHeight : 0
+        visible: endProcessButton.visible
 
         Button {
           id: endProcessButton
           readonly property string blockReason: processActions.blockReason(root.selectedProcess)
           readonly property bool targetAllowed: blockReason === ""
 
-          visible: root.selectedProcess !== null
+          visible: root.cursorActive && root.selectedProcess !== null
           enabled: !processActions.running && targetAllowed
           opacity: targetAllowed || processActions.running ? 1 : 0.48
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.right: parent.right
           iconText: "\uf2ed"
           text: processActions.running
             ? "Ending…"
@@ -1343,9 +1163,8 @@ Panel {
 
       Text {
         width: parent.width
-        text: processActions.status || ("e collapse  ·  / search  ·  "
-          + (root.powerEstimatesEnabled ? "c/m/w/p/t/n" : "c/m/p/t/n")
-          + " sort  ·  r refresh  ·  s settings  ·  j/k select  ·  x end app")
+        visible: processActions.status !== "" || root.hintsVisible
+        text: processActions.status || root.shortcutHintText()
         textFormat: Text.PlainText
         color: processActions.failed ? root.urgent : root.dim
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -1366,7 +1185,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       iconComponent: activityIcon
       title: "Activity"
-      meta: root.hasSnapshot ? "UP " + Model.formatDuration(root.snapshot.uptime) : "READING SYSTEM"
+      meta: root.hasSnapshot ? Model.formatDuration(root.snapshot.uptime) : "Reading system"
       foreground: root.foreground
       fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
     }
@@ -1376,12 +1195,15 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.spacing.sm
 
-      TemperatureBadge {
-        visible: root.cpuTemperature !== null
-        text: visible
-          ? Model.formatTemperature(root.cpuTemperature.value, root.temperatureUnitSetting)
-          : ""
-        implicitHeight: expandButton.implicitHeight
+      PanelActionButton {
+        visible: !root.settingsOpen
+        iconText: "\uf128"
+        tooltipText: root.hintsVisible ? "Hide keyboard shortcuts" : "Keyboard shortcuts"
+        foreground: root.hintsVisible ? root.accent : root.foreground
+        hoverColor: root.accent
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        bordered: true
+        onClicked: root.hintsVisible = !root.hintsVisible
       }
 
       PanelActionButton {
@@ -1408,26 +1230,6 @@ Panel {
     }
   }
 
-  component TemperatureBadge: BorderSurface {
-    property string text: ""
-
-    implicitWidth: temperatureText.implicitWidth + Style.space(10)
-    implicitHeight: temperatureText.implicitHeight + Style.space(4)
-    color: "transparent"
-    borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
-    radius: Style.cornerRadius
-
-    Text {
-      id: temperatureText
-      anchors.centerIn: parent
-      text: parent.text
-      color: root.dim
-      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.body
-      font.bold: true
-    }
-  }
-
   component MetricCard: BorderSurface {
     id: metricCard
 
@@ -1436,11 +1238,15 @@ Panel {
     property string value: ""
     property string detail: ""
     property var history: []
+    property var paint: ({ width: 0, height: 0, frames: [], cells: [] })
     property real ceiling: 0
+    property real bar: -1
+    property bool tall: false
     property color tone: root.accent
     property color badgeTone: root.dim
+    readonly property bool showCores: !!(paint && Array.isArray(paint.cells) && paint.cells.length > 0)
 
-    implicitHeight: Style.space(92)
+    implicitHeight: Style.space(tall ? 124 : 92)
     color: Style.normalFillFor(root.foreground, root.accent)
     borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
     radius: Style.cornerRadius
@@ -1479,27 +1285,50 @@ Panel {
         }
       }
 
-      Text {
+      Item {
         width: parent.width
-        text: value
-        color: tone
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.title
-        font.bold: true
-        elide: Text.ElideRight
-      }
+        implicitHeight: Math.max(valueBlock.implicitHeight, coreDie.implicitHeight)
 
-      Text {
-        text: detail
-        width: parent.width
-        color: root.dim
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+        Column {
+          id: valueBlock
+          anchors.left: parent.left
+          anchors.right: coreDie.visible ? coreDie.left : parent.right
+          anchors.rightMargin: coreDie.visible ? Style.spacing.sm : 0
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.spacing.xxs
+
+          Text {
+            width: parent.width
+            text: value
+            color: tone
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.title
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Text {
+            width: parent.width
+            text: detail
+            color: root.dim
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        CoreHeatGrid {
+          id: coreDie
+          visible: metricCard.showCores
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          paint: metricCard.paint
+        }
       }
     }
 
     Sparkline {
+      visible: metricCard.bar < 0 && Array.isArray(history) && history.length > 0
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: parent.bottom
@@ -1511,6 +1340,26 @@ Panel {
       ceiling: parent.ceiling
       lineColor: tone
       fillColor: Util.alpha(tone, 0.10)
+    }
+
+    Rectangle {
+      visible: metricCard.bar >= 0
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.leftMargin: Style.spacing.lg
+      anchors.rightMargin: Style.spacing.lg
+      anchors.bottomMargin: Style.spacing.sm
+      height: Style.space(4)
+      radius: height / 2
+      color: Util.alpha(root.foreground, 0.12)
+
+      Rectangle {
+        width: parent.width * Math.max(0, Math.min(1, metricCard.bar))
+        height: parent.height
+        radius: parent.radius
+        color: metricCard.tone
+      }
     }
   }
 
@@ -1537,7 +1386,7 @@ Panel {
       spacing: Style.spacing.xxs
 
       Text {
-        text: label.toUpperCase()
+        text: label
         color: root.dim
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
@@ -1571,85 +1420,89 @@ Panel {
     radius: Style.cornerRadius
   }
 
-  component DetailLine: Item {
-    id: detailLine
+  component CoreHeatGrid: Item {
+    id: heat
 
-    property string label: ""
-    property string value: ""
+    property var paint: ({ width: 0, height: 0, frames: [], cells: [] })
 
-    implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
+    readonly property var frames: paint && Array.isArray(paint.frames) ? paint.frames : []
+    readonly property var cells: paint && Array.isArray(paint.cells) ? paint.cells : []
 
-    Text {
-      id: labelText
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      width: parent.width * 0.38
-      text: label
-      textFormat: Text.PlainText
-      color: root.dim
-      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      elide: Text.ElideRight
+    implicitWidth: Math.max(0, Number(paint && paint.width || 0))
+    implicitHeight: Math.max(0, Number(paint && paint.height || 0))
+
+    function cellLabel(cell) {
+      var kind = String(cell && cell.kind || "same")
+      var index = String(cell && cell.name || "").replace(/^cpu/i, "")
+      var usage = Math.round(Number(cell && cell.usage || 0))
+      if (kind === "performance") return "P-core " + index + " · " + usage + "%"
+      if (kind === "efficiency") return "E-core " + index + " · " + usage + "%"
+      if (kind === "lowpower") return "LP-E " + index + " · " + usage + "%"
+      return "Core " + index + " · " + usage + "%"
     }
 
-    Text {
-      id: valueText
-      anchors.left: labelText.right
-      anchors.leftMargin: Style.spacing.md
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      text: value
-      textFormat: Text.PlainText
-      color: root.foreground
-      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      elide: Text.ElideLeft
-      horizontalAlignment: Text.AlignRight
-    }
-  }
-
-  component CoreLine: Row {
-    property var coreData: ({ name: "", usage: 0 })
-
-    spacing: Style.spacing.sm
-
-    Text {
-      id: coreIndex
-      width: Style.space(24)
-      text: String(coreData.name || "").replace("cpu", "")
-      color: root.dim
-      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.caption
-      horizontalAlignment: Text.AlignRight
-    }
-
-    Rectangle {
-      width: Math.max(1, parent.width - coreIndex.width - usageText.width - parent.spacing * 2)
-      height: Style.space(5)
-      radius: height / 2
-      color: Util.alpha(root.foreground, 0.12)
-      anchors.verticalCenter: parent.verticalCenter
+    Repeater {
+      model: heat.frames.length
 
       Rectangle {
-        width: parent.width * Math.max(0, Math.min(1, Number(coreData.usage || 0) / 100))
-        height: parent.height
-        radius: parent.radius
-        color: root.pressureColor(coreData.usage)
-
-        Behavior on width {
-          NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
-        }
+        required property int index
+        readonly property var frame: heat.frames[index] || ({})
+        x: Number(frame.x || 0)
+        y: Number(frame.y || 0)
+        width: Number(frame.w || 0)
+        height: Number(frame.h || 0)
+        radius: 2
+        color: "transparent"
+        border.width: 1
+        border.color: Util.alpha(root.foreground, 0.28)
       }
     }
 
-    Text {
-      id: usageText
-      width: Style.space(34)
-      text: Math.round(Number(coreData.usage || 0)) + "%"
-      color: root.foreground
-      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.caption
-      horizontalAlignment: Text.AlignRight
+    Repeater {
+      model: heat.cells.length
+
+      CoreDieCell {
+        required property int index
+        readonly property var cell: heat.cells[index] || ({})
+        x: Number(cell.x || 0)
+        y: Number(cell.y || 0)
+        size: Number(cell.size || 0)
+        usage: Number(cell.usage || 0)
+        tooltipText: heat.cellLabel(cell)
+      }
+    }
+  }
+
+  component CoreDieCell: Rectangle {
+    property int size: Style.space(7)
+    property real usage: 0
+    property string tooltipText: ""
+
+    width: size
+    height: size
+    radius: 1
+    color: "transparent"
+    border.width: 1
+    border.color: Util.alpha(root.foreground, 0.22)
+
+    Rectangle {
+      anchors.fill: parent
+      anchors.margins: 1
+      radius: 0
+      color: root.pressureColor(parent.usage)
+      opacity: parent.usage < 8 ? 0 : 0.28 + 0.72 * Math.pow(parent.usage / 100, 1.35)
+    }
+
+    MouseArea {
+      id: cellHover
+      anchors.fill: parent
+      hoverEnabled: true
+
+      PanelToolTip {
+        visible: cellHover.containsMouse && cellHover.parent.tooltipText !== ""
+        text: cellHover.parent.tooltipText
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+      }
     }
   }
 
@@ -1665,48 +1518,83 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.spacing.md
 
-      ProcessCell {
+      ProcessSortCell {
         width: root.processNameColumnWidth(parent.width, parent.spacing)
-        text: "NAME"
-        dimmed: true
+        sortKey: "name"
+        label: "Name"
       }
-      ProcessCell {
+      ProcessSortCell {
         width: root.processPidColumnWidth
-        text: "PID"
-        dimmed: true
+        sortKey: "pid"
+        label: "PID"
         alignment: Text.AlignRight
       }
       ProcessCell {
         visible: root.showProcessUserColumn
         width: root.processUserColumnWidth
-        text: "USER"
+        text: "User"
         dimmed: true
       }
-      ProcessCell {
+      ProcessSortCell {
         width: root.processMetricColumnWidth
-        text: "CPU"
-        dimmed: true
+        sortKey: "cpu"
+        label: "CPU"
         alignment: Text.AlignRight
       }
-      ProcessCell {
+      ProcessSortCell {
         width: root.processMetricColumnWidth
-        text: "RAM"
-        dimmed: true
+        sortKey: "memory"
+        label: "RAM"
         alignment: Text.AlignRight
       }
-      ProcessCell {
+      ProcessSortCell {
         visible: root.powerEstimatesEnabled
         width: root.processMetricColumnWidth
-        text: "EST. W"
-        dimmed: true
+        sortKey: "power"
+        label: "~W"
         alignment: Text.AlignRight
+        tooltipText: root.processPowerTooltip
       }
-      ProcessCell {
+      ProcessSortCell {
         visible: root.showProcessTimeColumn
         width: root.processMetricColumnWidth
-        text: "TIME"
-        dimmed: true
+        sortKey: "runtime"
+        label: "Time"
         alignment: Text.AlignRight
+      }
+    }
+  }
+
+  component ProcessSortCell: Item {
+    id: sortCell
+
+    property string sortKey: ""
+    property string label: ""
+    property string tooltipText: ""
+    property int alignment: Text.AlignLeft
+
+    implicitHeight: labelText.implicitHeight
+
+    ProcessCell {
+      id: labelText
+      width: parent.width
+      text: root.sortLabel(sortCell.sortKey, sortCell.label)
+      dimmed: root.sortKey !== sortCell.sortKey
+      emphasized: root.sortKey === sortCell.sortKey
+      alignment: sortCell.alignment
+    }
+
+    MouseArea {
+      id: sortHover
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.setSort(sortCell.sortKey)
+
+      PanelToolTip {
+        visible: sortCell.tooltipText !== "" && sortHover.containsMouse
+        text: sortCell.tooltipText
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       }
     }
   }

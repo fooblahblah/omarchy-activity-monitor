@@ -259,6 +259,51 @@ std::vector<std::string> SplitWhitespace(const std::string &value) {
   return fields;
 }
 
+std::unordered_set<int> ParseCpuList(const std::string &list) {
+  std::unordered_set<int> cpus;
+  const std::string value = Trim(list);
+  std::size_t index = 0;
+  while (index < value.size()) {
+    if (value[index] == ',' || value[index] == ' ') {
+      ++index;
+      continue;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(value[index]))) {
+      ++index;
+      continue;
+    }
+    int start = 0;
+    while (index < value.size() &&
+           std::isdigit(static_cast<unsigned char>(value[index]))) {
+      start = start * 10 + (value[index] - '0');
+      ++index;
+    }
+    int end = start;
+    if (index < value.size() && value[index] == '-') {
+      ++index;
+      end = 0;
+      bool any = false;
+      while (index < value.size() &&
+             std::isdigit(static_cast<unsigned char>(value[index]))) {
+        end = end * 10 + (value[index] - '0');
+        any = true;
+        ++index;
+      }
+      if (!any)
+        end = start;
+    }
+    if (end < start)
+      std::swap(start, end);
+    for (int cpu = start; cpu <= end && cpu < 4096; ++cpu)
+      cpus.insert(cpu);
+  }
+  return cpus;
+}
+
+bool CpuListContains(const std::string &list, int cpu) {
+  return ParseCpuList(list).count(cpu) != 0;
+}
+
 std::uint64_t PositiveEnv(const char *name, std::uint64_t fallback) {
   const char *value = std::getenv(name);
   if (!value)
@@ -282,6 +327,7 @@ public:
     output << "sample\t" << UptimeSample(paths_) << '\n';
     EmitMemorySpeed(output);
     EmitCpu(output);
+    EmitCpuTopology(output);
     EmitMemory(output);
     EmitTasks(output);
     EmitNetwork(output);
@@ -332,12 +378,25 @@ private:
     std::string path;
   };
 
+  struct CpuTopo {
+    int id = -1;
+    int core_id = -1;
+    std::string cluster;
+    std::string l2;
+    std::string l3;
+    std::string domain;
+    std::string cls;
+    std::uint64_t max_khz = 0;
+    std::uint64_t capacity = 0;
+  };
+
   Paths paths_;
   bool topology_discovered_ = false;
   bool memory_speed_checked_ = false;
   int memory_speed_mts_ = -1;
   std::vector<std::string> cpu_frequency_paths_;
   std::vector<BlockDevice> block_devices_;
+  std::vector<CpuTopo> cpu_topo_;
 
   void DiscoverTopology() {
     if (topology_discovered_)
@@ -367,6 +426,151 @@ private:
       if (!Exists(Join(path, "device/uevent")))
         continue;
       block_devices_.push_back({name, path});
+    }
+
+    DiscoverCpuTopology();
+  }
+
+  static std::string CacheSharedList(const std::string &cpu_path, const char *level) {
+    const std::string cache = Join(cpu_path, "cache");
+    for (const auto &name : DirectoryNames(cache)) {
+      if (!StartsWith(name, "index"))
+        continue;
+      const std::string index = Join(cache, name);
+      if (ReadLine(Join(index, "level")).value_or("") != level)
+        continue;
+      if (ReadLine(Join(index, "type")).value_or("") != "Unified")
+        continue;
+      return ReadLine(Join(index, "shared_cpu_list")).value_or("");
+    }
+    return "";
+  }
+
+  void DiscoverCpuTopology() {
+    cpu_topo_.clear();
+    const std::string cpu_root = Join(paths_.sys, "devices/system/cpu");
+    const std::string core_list =
+        ReadLine(Join(paths_.sys, "devices/cpu_core/cpus")).value_or("");
+    const std::string atom_list =
+        ReadLine(Join(paths_.sys, "devices/cpu_atom/cpus")).value_or("");
+    const bool intel_hybrid = !core_list.empty() || !atom_list.empty();
+
+    for (const auto &name : DirectoryNames(cpu_root)) {
+      if (!StartsWith(name, "cpu") || !IsDigits(std::string_view(name).substr(3)))
+        continue;
+      const int id = static_cast<int>(ParseUnsigned(name.substr(3)).value_or(4096));
+      if (id >= 4096)
+        continue;
+      const std::string path = Join(cpu_root, name);
+      const std::string topo = Join(path, "topology");
+      if (!IsDirectory(topo))
+        continue;
+      if (Exists(Join(path, "online")) &&
+          ReadLine(Join(path, "online")).value_or("1") == "0")
+        continue;
+
+      CpuTopo cpu;
+      cpu.id = id;
+      cpu.core_id = static_cast<int>(
+          ParseUnsigned(ReadLine(Join(topo, "core_id")).value_or("")).value_or(id));
+      cpu.cluster = ReadLine(Join(topo, "cluster_cpus_list")).value_or("");
+      if (cpu.cluster.empty())
+        cpu.cluster = std::to_string(id);
+      cpu.l2 = CacheSharedList(path, "2");
+      cpu.l3 = CacheSharedList(path, "3");
+      cpu.domain = !cpu.l3.empty() ? cpu.l3 : (!cpu.l2.empty() ? cpu.l2 : cpu.cluster);
+      cpu.max_khz =
+          ParseUnsigned(ReadLine(Join(path, "cpufreq/cpuinfo_max_freq")).value_or(""))
+              .value_or(0);
+      cpu.capacity =
+          ParseUnsigned(ReadLine(Join(path, "cpu_capacity")).value_or("")).value_or(0);
+      cpu_topo_.push_back(std::move(cpu));
+    }
+
+    std::sort(cpu_topo_.begin(), cpu_topo_.end(),
+              [](const CpuTopo &left, const CpuTopo &right) { return left.id < right.id; });
+
+    std::unordered_set<std::string> p_l3;
+    for (const auto &cpu : cpu_topo_) {
+      if (intel_hybrid && CpuListContains(core_list, cpu.id) && !cpu.l3.empty())
+        p_l3.insert(cpu.l3);
+    }
+
+    for (auto &cpu : cpu_topo_) {
+      if (intel_hybrid && CpuListContains(core_list, cpu.id)) {
+        cpu.cls = "performance";
+        continue;
+      }
+      if (intel_hybrid && CpuListContains(atom_list, cpu.id)) {
+        cpu.cls = (cpu.l3.empty() || p_l3.count(cpu.l3) == 0) ? "lowpower"
+                                                              : "efficiency";
+        continue;
+      }
+    }
+
+    ClassifyUnlabeledCpus();
+  }
+
+  void ClassifyUnlabeledCpus() {
+    std::vector<std::uint64_t> keys;
+    keys.reserve(cpu_topo_.size());
+    bool any_capacity = false;
+    for (const auto &cpu : cpu_topo_) {
+      if (!cpu.cls.empty())
+        continue;
+      if (cpu.capacity > 0)
+        any_capacity = true;
+      keys.push_back(cpu.capacity > 0 ? cpu.capacity : cpu.max_khz);
+    }
+    if (keys.empty())
+      return;
+
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::vector<std::uint64_t> groups;
+    for (const auto key : keys) {
+      if (groups.empty() || key > groups.back() * 112 / 100)
+        groups.push_back(key);
+    }
+    if (groups.size() <= 1) {
+      for (auto &cpu : cpu_topo_)
+        if (cpu.cls.empty())
+          cpu.cls = "performance";
+      return;
+    }
+
+    const std::uint64_t high = groups.back();
+    const std::uint64_t low = groups.front();
+    for (auto &cpu : cpu_topo_) {
+      if (!cpu.cls.empty())
+        continue;
+      const std::uint64_t key = any_capacity && cpu.capacity > 0 ? cpu.capacity
+                                                                : cpu.max_khz;
+      std::uint64_t nearest = groups[0];
+      auto distance = [](std::uint64_t left, std::uint64_t right) {
+        return left > right ? left - right : right - left;
+      };
+      for (const auto group : groups) {
+        if (distance(key, group) < distance(key, nearest))
+          nearest = group;
+      }
+      if (nearest == high)
+        cpu.cls = "performance";
+      else if (nearest == low && groups.size() >= 3)
+        cpu.cls = "lowpower";
+      else
+        cpu.cls = "efficiency";
+    }
+  }
+
+  void EmitCpuTopology(std::ostream &output) const {
+    if (cpu_topo_.empty())
+      return;
+    for (const auto &cpu : cpu_topo_) {
+      output << "cpu-topo\t" << cpu.id << '\t'
+             << (cpu.cls.empty() ? "performance" : cpu.cls) << '\t' << cpu.domain
+             << '\t' << cpu.cluster << '\t' << cpu.core_id << '\t' << cpu.max_khz
+             << '\n';
     }
   }
 

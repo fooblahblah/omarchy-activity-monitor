@@ -5,7 +5,7 @@
   "version": "2.1.1",
   "author": "Kristoffer Haugland",
   "license": "MIT",
-  "description": "Native low-overhead CPU, RAM, GPU, storage, process, and estimated CPU-package power monitoring",
+  "description": "A calm, low-overhead glance at CPU, memory, GPU, storage, and processes — with a die that matches your chip",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Activity Monitor",
-    "description": "A quick system overview with expandable GPU memory, resources, storage, processes, and estimated per-process CPU-package power share.",
+    "description": "A calm system glance with an expandable process view and a CPU die that matches your hardware.",
     "category": "System",
     "aliases": [
       "activity",
