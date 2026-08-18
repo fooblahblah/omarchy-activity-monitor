@@ -20,6 +20,27 @@ assertEqual(storage.path, '/', 'activity identifies the root filesystem')
 assertEqual(storage.total, 4096000, 'activity parses total storage bytes')
 assertEqual(storage.used, 3072000, 'activity parses used storage bytes')
 assertEqual(storage.available, 819200, 'activity parses user-available storage bytes')
+assertEqual(storage.volumes.length, 1, 'activity keeps a single storage line as one volume')
+
+const volumes = activity.parseStorageSnapshot([
+  'schema\tactivity-storage\t1',
+  'sample\t12',
+  'storage\t/data\t200\t180\t20',
+  'storage\t/\t100\t20\t80',
+  ''
+].join('\n'))
+assertEqual(volumes.volumes.length, 2, 'activity keeps multiple storage volumes')
+assertEqual(volumes.path, '/', 'activity still exposes root as the primary storage path')
+assertEqual(volumes.volumes[0].path, '/', 'activity sorts the root volume first')
+assertEqual(volumes.volumes[1].path, '/data', 'activity keeps additional mountpoints')
+assertEqual(activity.storageVolumeLabel('/'), '/', 'activity labels the root volume as /')
+assertEqual(activity.storageVolumeLabel('/mnt/data'), 'data', 'activity labels a volume by its last path component')
+assertEqual(activity.tightestStorageVolume(volumes.volumes).path, '/data', 'activity prefers the fullest volume')
+assertEqual(activity.selectStorageVolume(volumes.volumes, '', false).path, '/data', 'activity defaults storage to the fullest volume')
+assertEqual(activity.selectStorageVolume(volumes.volumes, '/', true).path, '/', 'activity keeps a pinned storage volume')
+assertEqual(activity.selectStorageVolume(volumes.volumes, '/gone', true).path, '/data', 'activity falls back when a pinned volume disappears')
+assertEqual(activity.cycleItemId(volumes.volumes, '/data', 'path', 1), '/', 'activity wraps the storage pager')
+assertEqual(activity.nextCycleIndex(3, 0, -1), 2, 'activity wraps a pager backward')
 
 const invalidStorage = activity.parseStorageSnapshot(
   'schema\tactivity-storage\t1\nstorage\t/\t100\t120\t110\n'
@@ -418,6 +439,37 @@ expected_storage=$'schema\tactivity-storage\t1\nsample\t321.50\nstorage\t/\t4096
 [[ $storage_snapshot == "$expected_storage" ]] ||
   fail "activity root storage output is exact, versioned, and byte-based" "$storage_snapshot"
 pass "activity root storage output is exact, versioned, and byte-based"
+
+printf '%s\n' \
+  $'/data 4096 2000 100 50' \
+  $'/ 4096 1000 250 200' \
+  >"$fixture_root/statfs-multi"
+multi_storage_snapshot=$(
+  OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \
+    OMARCHY_SYSTEM_STATS_ROOT_PATH="$fixture_root/root filesystem" \
+    OMARCHY_SYSTEM_STATS_STATFS_FIXTURE_PATH="$fixture_root/statfs-multi" \
+    "$ROOT/activity-stats" --activity-storage
+)
+expected_multi_storage=$'schema\tactivity-storage\t1\nsample\t321.50\nstorage\t/\t4096000\t3072000\t819200\nstorage\t/data\t8192000\t7782400\t204800'
+[[ $multi_storage_snapshot == "$expected_multi_storage" ]] ||
+  fail "activity storage output lists local volumes in stable order" "$multi_storage_snapshot"
+pass "activity storage output lists local volumes in stable order"
+
+live_storage=$("$ROOT/activity-stats" --activity-storage)
+grep -Eq $'^storage\t/' <<<"$live_storage" ||
+  fail "activity live storage does not include the root filesystem" "$live_storage"
+if findmnt -n -o FSTYPE /tmp >/dev/null 2>&1 && [[ $(findmnt -n -o FSTYPE /tmp) == tmpfs ]]; then
+  if grep -Eq $'^storage\t/tmp\t' <<<"$live_storage"; then
+    fail "activity live storage includes tmpfs" "$live_storage"
+  fi
+fi
+root_source=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+home_source=$(findmnt -n -o SOURCE /home 2>/dev/null || true)
+if [[ -n $home_source && $home_source == "$root_source" ]] &&
+   grep -Eq $'^storage\t/home\t' <<<"$live_storage"; then
+  fail "activity storage splits subvolumes of the same device" "$live_storage"
+fi
+pass "activity live storage stays on local filesystems"
 
 thermal_snapshot=$(
   OMARCHY_SYSTEM_STATS_PROC_PATH="$proc_path" \

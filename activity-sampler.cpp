@@ -6,6 +6,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <mntent.h>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -427,6 +429,10 @@ private:
         continue;
       block_devices_.push_back({name, path});
     }
+    std::sort(block_devices_.begin(), block_devices_.end(),
+              [](const BlockDevice &left, const BlockDevice &right) {
+                return left.name < right.name;
+              });
 
     DiscoverCpuTopology();
   }
@@ -1036,40 +1042,179 @@ public:
     output << "schema\tactivity-storage\t1\n";
     output << "sample\t" << UptimeSample(paths_) << '\n';
 
-    std::uint64_t block_size = 0;
-    std::uint64_t blocks = 0;
-    std::uint64_t free_blocks = 0;
-    std::uint64_t available_blocks = 0;
-    if (!paths_.statfs_fixture.empty()) {
-      const auto line = ReadLine(paths_.statfs_fixture);
-      const auto fields =
-          line ? SplitWhitespace(*line) : std::vector<std::string>{};
-      if (fields.size() >= 4) {
-        block_size = ParseUnsigned(fields[0]).value_or(0);
-        blocks = ParseUnsigned(fields[1]).value_or(0);
-        free_blocks = ParseUnsigned(fields[2]).value_or(0);
-        available_blocks = ParseUnsigned(fields[3]).value_or(0);
-      }
-    } else {
-      struct statvfs values{};
-      if (statvfs(paths_.root.c_str(), &values) != 0)
-        return;
-      block_size = values.f_frsize ? values.f_frsize : values.f_bsize;
-      blocks = values.f_blocks;
-      free_blocks = values.f_bfree;
-      available_blocks = values.f_bavail;
-    }
-    if (block_size == 0 || blocks == 0)
-      return;
-    free_blocks = std::min(free_blocks, blocks);
-    available_blocks = std::min(available_blocks, blocks);
-    output << "storage\t/\t" << block_size * blocks << '\t'
-           << block_size * (blocks - free_blocks) << '\t'
-           << block_size * available_blocks << '\n';
+    auto volumes = !paths_.statfs_fixture.empty()
+                       ? VolumesFromFixture(paths_.statfs_fixture)
+                       : VolumesFromMounts();
+    std::sort(volumes.begin(), volumes.end(),
+              [](const Volume &left, const Volume &right) {
+                if (left.path == "/")
+                  return right.path != "/";
+                if (right.path == "/")
+                  return false;
+                return left.path < right.path;
+              });
+
+    for (const auto &volume : volumes)
+      output << "storage\t" << Sanitize(volume.path) << '\t' << volume.total
+             << '\t' << volume.used << '\t' << volume.available << '\n';
   }
 
 private:
+  struct Volume {
+    std::string path;
+    std::string source;
+    std::uint64_t total = 0;
+    std::uint64_t used = 0;
+    std::uint64_t available = 0;
+    unsigned long fsid = 0;
+  };
+
   Paths paths_;
+
+  static bool FillVolume(Volume *volume, std::uint64_t block_size,
+                         std::uint64_t blocks, std::uint64_t free_blocks,
+                         std::uint64_t available_blocks) {
+    if (!volume || block_size == 0 || blocks == 0)
+      return false;
+    free_blocks = std::min(free_blocks, blocks);
+    available_blocks = std::min(available_blocks, blocks);
+    volume->total = block_size * blocks;
+    volume->used = block_size * (blocks - free_blocks);
+    volume->available = block_size * available_blocks;
+    return true;
+  }
+
+  static bool FillFromStatvfs(const std::string &path, Volume *volume) {
+    struct statvfs values{};
+    if (statvfs(path.c_str(), &values) != 0)
+      return false;
+    const std::uint64_t block_size =
+        values.f_frsize ? values.f_frsize : values.f_bsize;
+    if (!FillVolume(volume, block_size, values.f_blocks, values.f_bfree,
+                    values.f_bavail))
+      return false;
+    volume->fsid = values.f_fsid;
+    return true;
+  }
+
+  static std::vector<Volume> VolumesFromFixture(const std::string &path) {
+    std::ifstream stream(path);
+    std::vector<Volume> volumes;
+    std::string line;
+    while (std::getline(stream, line)) {
+      const auto fields = SplitWhitespace(line);
+      Volume volume;
+      std::size_t offset = 0;
+      if (fields.size() >= 5) {
+        volume.path = fields[0];
+        offset = 1;
+      } else if (fields.size() >= 4) {
+        volume.path = "/";
+      } else {
+        continue;
+      }
+      if (!FillVolume(&volume, ParseUnsigned(fields[offset]).value_or(0),
+                      ParseUnsigned(fields[offset + 1]).value_or(0),
+                      ParseUnsigned(fields[offset + 2]).value_or(0),
+                      ParseUnsigned(fields[offset + 3]).value_or(0)))
+        continue;
+      if (volume.path.empty())
+        volume.path = "/";
+      volumes.push_back(std::move(volume));
+    }
+    return volumes;
+  }
+
+  static bool IsLocalFsType(std::string_view fstype) {
+    return fstype == "ext2" || fstype == "ext3" || fstype == "ext4" ||
+           fstype == "xfs" || fstype == "btrfs" || fstype == "f2fs" ||
+           fstype == "bcachefs" || fstype == "zfs" || fstype == "zfs3" ||
+           fstype == "nilfs2" || fstype == "jfs" || fstype == "reiserfs" ||
+           fstype == "reiser4" || fstype == "vfat" || fstype == "msdos" ||
+           fstype == "exfat" || fstype == "ntfs" || fstype == "ntfs3" ||
+           fstype == "fuseblk" || fstype == "ufs" || fstype == "erofs";
+  }
+
+  static bool IsSkippedMountpoint(std::string_view path) {
+    if (path == "/boot" || path == "/boot/efi" || path == "/boot/EFI" ||
+        path == "/efi")
+      return true;
+    if (path == "/snap" || StartsWith(path, "/snap/"))
+      return true;
+    if (path == "/run" ||
+        (StartsWith(path, "/run/") && !StartsWith(path, "/run/media/")))
+      return true;
+    return StartsWith(path, "/proc") || StartsWith(path, "/sys") ||
+           StartsWith(path, "/dev");
+  }
+
+  static bool HasBindOption(const char *options) {
+    if (!options || !*options)
+      return false;
+    std::string_view view(options);
+    std::size_t start = 0;
+    while (start <= view.size()) {
+      const auto comma = view.find(',', start);
+      const auto option = view.substr(
+          start, comma == std::string_view::npos ? view.size() - start
+                                                 : comma - start);
+      if (option == "bind")
+        return true;
+      if (comma == std::string_view::npos)
+        break;
+      start = comma + 1;
+    }
+    return false;
+  }
+
+  static bool SameStoragePool(const Volume &left, const Volume &right) {
+    if (left.fsid != 0 && left.fsid == right.fsid)
+      return true;
+    return !left.source.empty() && left.source == right.source;
+  }
+
+  std::vector<Volume> VolumesFromMounts() const {
+    std::vector<Volume> volumes;
+    Volume root;
+    root.path = "/";
+    if (FillFromStatvfs(paths_.root, &root))
+      volumes.push_back(root);
+
+    FILE *mounts = setmntent(Join(paths_.proc, "mounts").c_str(), "r");
+    if (!mounts)
+      return volumes;
+
+    while (mntent *entry = getmntent(mounts)) {
+      if (!entry->mnt_dir || !entry->mnt_type)
+        continue;
+      const std::string path = entry->mnt_dir;
+      const std::string source = entry->mnt_fsname ? entry->mnt_fsname : "";
+      if (path == "/") {
+        if (!volumes.empty() && volumes[0].path == "/")
+          volumes[0].source = source;
+        continue;
+      }
+      if (path.empty() || !IsLocalFsType(entry->mnt_type) ||
+          IsSkippedMountpoint(path) || HasBindOption(entry->mnt_opts))
+        continue;
+      Volume volume;
+      volume.path = path;
+      volume.source = source;
+      if (!FillFromStatvfs(path, &volume))
+        continue;
+      bool duplicate = false;
+      for (const auto &existing : volumes) {
+        if (existing.path == volume.path || SameStoragePool(existing, volume)) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate)
+        volumes.push_back(std::move(volume));
+    }
+    endmntent(mounts);
+    return volumes;
+  }
 };
 
 class PowerCollector {

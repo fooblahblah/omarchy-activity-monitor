@@ -59,8 +59,58 @@ assertEqual(metrics.download, 2048, 'activity derives network receive rate')
 assertEqual(metrics.upload, 1024, 'activity derives network transmit rate')
 assertEqual(metrics.diskRead, 4096, 'activity derives disk read rate')
 assertEqual(metrics.diskWrite, 2048, 'activity derives disk write rate')
+assertEqual(metrics.diskDevices.length, 1, 'activity keeps a single disk as one device')
+assertEqual(metrics.diskDevices[0].name, 'sda', 'activity names the sampled disk')
+assertEqual(activity.diskCycleItems(metrics).length, 1, 'activity does not page a single disk')
 assertEqual(metrics.cores[0].usage, 60, 'activity derives per-core usage')
 assertEqual(metrics.networkInterface, 'eth0', 'activity follows the default interface without double-counting tunnels')
+
+const firstMultiDisk = activity.parseSnapshot([
+  'schema\tactivity-resources\t1',
+  'sample\t2000',
+  'disk\t8:0\tsda\t100\t200',
+  'disk\t259:0\tnvme0n1\t50\t80',
+  ''
+].join('\n'))
+const secondMultiDisk = activity.parseSnapshot([
+  'schema\tactivity-resources\t1',
+  'sample\t2001',
+  'disk\t8:0\tsda\t108\t204',
+  'disk\t259:0\tnvme0n1\t58\t88',
+  ''
+].join('\n'))
+const multiDisk = activity.nextMetrics(firstMultiDisk, secondMultiDisk, {}, 4)
+assertEqual(multiDisk.diskRead, 8192, 'activity sums read rates across disks')
+assertEqual(multiDisk.diskWrite, 6144, 'activity sums write rates across disks')
+assertEqual(multiDisk.diskDevices.length, 2, 'activity keeps per-disk rates')
+assertEqual(multiDisk.diskDevices[0].name, 'nvme0n1', 'activity sorts disks by name')
+assertEqual(multiDisk.diskDevices[0].read, 4096, 'activity derives the first disk read rate')
+assertEqual(multiDisk.diskDevices[1].write, 2048, 'activity derives the second disk write rate')
+const diskItems = activity.diskCycleItems(multiDisk)
+assertEqual(diskItems.length, 3, 'activity prepends an All slot when there are multiple disks')
+assertEqual(diskItems[0].id, 'all', 'activity starts the disk pager on the combined total')
+assertEqual(diskItems[0].read, 8192, 'activity All slot uses the combined read rate')
+assertEqual(activity.selectDiskItem(diskItems, '8:0').name, 'sda', 'activity can select a named disk')
+assertEqual(activity.cycleItemId(diskItems, 'all', 'id', 1), '259:0', 'activity cycles from All to the first named disk')
+assertEqual(activity.cycleItemId(diskItems, '8:0', 'id', 1), 'all', 'activity wraps the disk pager')
+
+const hotplugDisk = activity.parseSnapshot([
+  'schema\tactivity-resources\t1',
+  'sample\t2002',
+  'disk\t8:0\tsda\t116\t208',
+  'disk\t8:16\tsdb\t10\t20',
+  'disk\t259:0\tnvme0n1\t66\t96',
+  ''
+].join('\n'))
+const afterHotplug = activity.nextMetrics(secondMultiDisk, hotplugDisk, multiDisk, 4)
+assertEqual(afterHotplug.diskRead, 8192, 'activity keeps existing disk rates when a disk appears')
+assertEqual(afterHotplug.diskDevices.length, 3, 'activity adds a newly attached disk')
+assertEqual(
+  afterHotplug.diskDevices.find(disk => disk.name === 'sdb').read,
+  0,
+  'activity baselines a newly attached disk at zero'
+)
+assertEqual(afterHotplug.diskHistories['259:0'].length, 2, 'activity keeps per-disk sparkline history')
 
 const withHistory = activity.nextMetrics(second, second, {
   cpuHistory: [10, 20],
@@ -586,7 +636,7 @@ if grep -Fq 'component TemperatureBadge' "$panel_file"; then
 fi
 pass "activity keeps CPU temperature on the CPU card"
 
-grep -Fq 'label: "Storage"' "$panel_file" ||
+grep -Fq 'label: root.storageCardLabel()' "$panel_file" ||
   fail "activity expanded details do not show disk storage"
 grep -Fq 'label: root.gpuHeadingText()' "$panel_file" &&
   grep -Fq 'gpuUsageText(adapters[0])' "$panel_file" ||
@@ -599,6 +649,16 @@ grep -Fq 'function storageCardValue()' "$panel_file" &&
   grep -Fq 'function storageCardDetail()' "$panel_file" &&
   grep -Fq '" free"' "$panel_file" ||
   fail "activity storage card does not show used storage and free space"
+grep -Fq 'function cycleDisk(' "$panel_file" &&
+  grep -Fq 'function cycleStorage(' "$panel_file" &&
+  grep -Fq 'interactive: root.canCycleDisks' "$panel_file" &&
+  grep -Fq 'interactive: root.canCycleStorage' "$panel_file" &&
+  grep -Fq 'raw === "D" ? -1 : 1' "$panel_file" &&
+  grep -Fq 'raw === "V" ? -1 : 1' "$panel_file" &&
+  grep -Fq 'd/v cycle drives' "$panel_file" ||
+  fail "activity does not page Disk and Storage with click and d/v"
+grep -Fq 'resetDriveSelection()' "$panel_file" ||
+  fail "activity does not reset drive selection when the panel closes"
 if grep -Fq 'POWER & THERMALS' "$panel_file"; then
   fail "activity expanded details still show power and thermals"
 fi

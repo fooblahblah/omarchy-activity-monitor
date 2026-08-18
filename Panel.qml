@@ -53,9 +53,20 @@ Panel {
         ? "Estimated CPU-time share of measured CPU package power"
         : "Measuring CPU package energy…"))
   readonly property var cpuTemperature: Model.cpuTemperature(activity.thermalSnapshot.temperatures)
-  readonly property real storageUsedFraction: storageSnapshot.total > 0
-    ? Math.max(0, Math.min(1, storageSnapshot.used / storageSnapshot.total))
-    : 0
+  property string selectedDiskId: "all"
+  property string selectedStoragePath: ""
+  property bool storageSelectionPinned: false
+  readonly property var diskItems: Model.diskCycleItems(metrics)
+  readonly property var storageItems: Model.storageVolumes(storageSnapshot)
+  readonly property var activeDisk: Model.selectDiskItem(diskItems, selectedDiskId)
+  readonly property var activeStorage: Model.selectStorageVolume(
+    storageItems,
+    selectedStoragePath,
+    storageSelectionPinned
+  )
+  readonly property real storageUsedFraction: Model.storageUsedFraction(activeStorage)
+  readonly property bool canCycleDisks: diskItems.length > 1
+  readonly property bool canCycleStorage: storageItems.length > 1
   readonly property int dieGapCompact: Style.space(2)
   readonly property int dieGapExpanded: Style.space(3)
   readonly property var corePaintSizesCompact: ({
@@ -391,16 +402,76 @@ Panel {
     return parts.join(" · ")
   }
 
+  function resetDriveSelection() {
+    selectedDiskId = "all"
+    selectedStoragePath = ""
+    storageSelectionPinned = false
+  }
+
+  function cycleDisk(delta) {
+    var next = Model.cycleItemId(diskItems, selectedDiskId, "id", delta)
+    if (next !== "") selectedDiskId = next
+  }
+
+  function cycleStorage(delta) {
+    var current = activeStorage ? activeStorage.path : selectedStoragePath
+    var next = Model.cycleItemId(storageItems, current, "path", delta)
+    if (next === "") return
+    storageSelectionPinned = true
+    selectedStoragePath = next
+  }
+
+  function pagerText(items, currentId, key) {
+    if (!items || items.length <= 1) return ""
+    var wanted = String(currentId || "")
+    var index = 0
+    for (var i = 0; i < items.length; i++) {
+      if (String(items[i][key]) === wanted) {
+        index = i
+        break
+      }
+    }
+    return (index + 1) + "/" + items.length
+  }
+
+  function diskCardLabel() {
+    if (!canCycleDisks) return "Disk"
+    return activeDisk && activeDisk.id !== "all" ? String(activeDisk.name || "Disk") : "Disk"
+  }
+
+  function diskPagerText() {
+    return pagerText(diskItems, activeDisk ? activeDisk.id : selectedDiskId, "id")
+  }
+
+  function diskCardRead() {
+    return activeDisk ? Number(activeDisk.read || 0) : Number(metrics.diskRead || 0)
+  }
+
+  function diskCardWrite() {
+    return activeDisk ? Number(activeDisk.write || 0) : Number(metrics.diskWrite || 0)
+  }
+
+  function diskCardHistory() {
+    return activeDisk && Array.isArray(activeDisk.history) ? activeDisk.history : metrics.diskHistory
+  }
+
+  function storageCardLabel() {
+    if (!canCycleStorage) return "Storage"
+    return Model.storageVolumeLabel(activeStorage && activeStorage.path)
+  }
+
+  function storagePagerText() {
+    return pagerText(storageItems, activeStorage ? activeStorage.path : selectedStoragePath, "path")
+  }
+
   function storageCardValue() {
-    return storageSnapshot.sample > 0
-      ? Model.formatBytes(storageSnapshot.used)
-      : "—"
+    if (storageSnapshot.sample <= 0) return "—"
+    return activeStorage ? Model.formatBytes(activeStorage.used) : "—"
   }
 
   function storageCardDetail() {
-    return storageSnapshot.sample > 0
-      ? Model.formatBytes(storageSnapshot.available) + " free"
-      : ""
+    if (storageSnapshot.sample <= 0) return ""
+    return activeStorage ? Model.formatBytes(activeStorage.available) + " free" : ""
   }
 
   function pressureColor(value) {
@@ -432,7 +503,9 @@ Panel {
   function shortcutHintText() {
     return "e collapse  ·  / search  ·  "
       + (powerEstimatesEnabled ? "c/m/w/p/t/n" : "c/m/p/t/n")
-      + " sort  ·  r refresh  ·  s settings  ·  j/k select  ·  x end app  ·  ? hide"
+      + " sort  ·  r refresh  ·  s settings  ·  j/k select  ·  x end app"
+      + ((canCycleDisks || canCycleStorage) ? "  ·  d/v cycle drives" : "")
+      + "  ·  ? hide"
   }
 
   function selectProcessFromPointer(index, item, mouse) {
@@ -489,12 +562,14 @@ Panel {
       selectedProcessKey = ""
       processQuery = ""
       hintsVisible = false
+      resetDriveSelection()
     } else {
       expanded = false
       settingsOpen = false
       settingsControlActive = false
       hintsVisible = false
       processQuery = ""
+      resetDriveSelection()
     }
   }
 
@@ -591,13 +666,16 @@ Panel {
       }
       onTextKey: function(text) {
         if (processActions.confirmationOpen) return
-        var key = String(text || "").toLowerCase()
+        var raw = String(text || "")
+        var key = raw.toLowerCase()
         if (key === "s") root.setSettingsOpen(!root.settingsOpen)
         else if (key === "?") root.hintsVisible = !root.hintsVisible
         else if (root.settingsOpen) return
         else if (key === "e") root.setExpanded(!root.expanded)
         else if (key === "r") root.refresh()
         else if (key === "/" && root.expanded) root.focusSearch()
+        else if (key === "d" && root.expanded) root.cycleDisk(raw === "D" ? -1 : 1)
+        else if (key === "v" && root.expanded) root.cycleStorage(raw === "V" ? -1 : 1)
         else if (key === "c" && root.expanded) root.setSort("cpu")
         else if (key === "m" && root.expanded) root.setSort("memory")
         else if (key === "w" && root.expanded) root.setSort("power")
@@ -1004,22 +1082,30 @@ Panel {
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "Disk"
-          value: Model.formatBytes(root.metrics.diskRead, "/s")
-          detail: "\uf093  " + Model.formatBytes(root.metrics.diskWrite, "/s")
-          history: root.metrics.diskHistory
+          label: root.diskCardLabel()
+          badge: root.diskPagerText()
+          value: Model.formatBytes(root.diskCardRead(), "/s")
+          detail: "\uf093  " + Model.formatBytes(root.diskCardWrite(), "/s")
+          history: root.diskCardHistory()
           tone: root.accent
           tall: true
+          interactive: root.canCycleDisks
+          tooltipText: root.canCycleDisks ? "Next disk" : ""
+          onActivated: function(delta) { root.cycleDisk(delta) }
         }
 
         MetricCard {
           width: (summaryGrid.width - summaryGrid.spacing * (summaryGrid.columns - 1)) / summaryGrid.columns
-          label: "Storage"
+          label: root.storageCardLabel()
+          badge: root.storagePagerText()
           value: root.storageCardValue()
           detail: root.storageCardDetail()
           bar: root.storageSnapshot.sample > 0 ? root.storageUsedFraction : -1
           tone: root.pressureColor(root.storageUsedFraction * 100)
           tall: true
+          interactive: root.canCycleStorage
+          tooltipText: root.canCycleStorage ? "Next volume" : ""
+          onActivated: function(delta) { root.cycleStorage(delta) }
         }
       }
 
@@ -1242,9 +1328,12 @@ Panel {
     property real ceiling: 0
     property real bar: -1
     property bool tall: false
+    property bool interactive: false
+    property string tooltipText: ""
     property color tone: root.accent
     property color badgeTone: root.dim
     readonly property bool showCores: !!(paint && Array.isArray(paint.cells) && paint.cells.length > 0)
+    signal activated(int delta)
 
     implicitHeight: Style.space(tall ? 124 : 92)
     color: Style.normalFillFor(root.foreground, root.accent)
@@ -1359,6 +1448,24 @@ Panel {
         height: parent.height
         radius: parent.radius
         color: metricCard.tone
+      }
+    }
+
+    MouseArea {
+      id: cardClick
+      anchors.fill: parent
+      enabled: metricCard.interactive
+      hoverEnabled: metricCard.interactive
+      cursorShape: metricCard.interactive ? Qt.PointingHandCursor : Qt.ArrowCursor
+      acceptedButtons: Qt.LeftButton
+      onClicked: function(mouse) {
+        metricCard.activated((mouse.modifiers & Qt.ShiftModifier) ? -1 : 1)
+      }
+
+      PanelToolTip {
+        visible: metricCard.interactive && metricCard.tooltipText !== "" && cardClick.containsMouse
+        text: metricCard.tooltipText
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       }
     }
   }

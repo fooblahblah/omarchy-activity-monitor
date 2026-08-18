@@ -44,7 +44,9 @@ function emptyMetrics() {
     cpuHistory: [],
     memoryHistory: [],
     networkHistory: [],
-    diskHistory: []
+    diskHistory: [],
+    diskDevices: [],
+    diskHistories: {}
   }
 }
 
@@ -88,7 +90,8 @@ function emptyStorageSnapshot() {
     path: "/",
     total: 0,
     used: 0,
-    available: 0
+    available: 0,
+    volumes: []
   }
 }
 
@@ -288,6 +291,44 @@ function parsePackagePowerSnapshot(raw) {
   return snapshot
 }
 
+function boundedStorageVolume(path, total, used, available) {
+  var size = Math.max(0, number(total))
+  return {
+    path: String(path || "/"),
+    total: size,
+    used: Math.min(size, Math.max(0, number(used))),
+    available: Math.min(size, Math.max(0, number(available)))
+  }
+}
+
+function compareStoragePath(left, right) {
+  var a = String(left && left.path || "")
+  var b = String(right && right.path || "")
+  if (a === "/") return b === "/" ? 0 : -1
+  if (b === "/") return 1
+  if (a < b) return -1
+  if (a > b) return 1
+  return 0
+}
+
+function applyPrimaryStorage(snapshot) {
+  var volumes = snapshot && Array.isArray(snapshot.volumes) ? snapshot.volumes : []
+  var primary = null
+  for (var i = 0; i < volumes.length; i++) {
+    if (volumes[i].path === "/") {
+      primary = volumes[i]
+      break
+    }
+  }
+  if (!primary && volumes.length > 0) primary = volumes[0]
+  if (!primary) return snapshot
+  snapshot.path = primary.path
+  snapshot.total = primary.total
+  snapshot.used = primary.used
+  snapshot.available = primary.available
+  return snapshot
+}
+
 function parseStorageSnapshot(raw) {
   var snapshot = emptyStorageSnapshot()
   var lines = String(raw || "").split("\n")
@@ -300,14 +341,17 @@ function parseStorageSnapshot(raw) {
     } else if (fields[0] === "sample") {
       snapshot.sample = number(fields[1])
     } else if (fields[0] === "storage") {
-      snapshot.path = String(fields[1] || "/")
-      snapshot.total = Math.max(0, number(fields[2]))
-      snapshot.used = Math.min(snapshot.total, Math.max(0, number(fields[3])))
-      snapshot.available = Math.min(snapshot.total, Math.max(0, number(fields[4])))
+      snapshot.volumes.push(boundedStorageVolume(
+        fields[1],
+        fields[2],
+        fields[3],
+        fields[4]
+      ))
     }
   }
 
-  return snapshot
+  snapshot.volumes.sort(compareStoragePath)
+  return applyPrimaryStorage(snapshot)
 }
 
 function parseGpuSnapshot(raw) {
@@ -606,13 +650,28 @@ function selectNetwork(previous, current, preferredName) {
   return best || values[0]
 }
 
+function diskId(disk) {
+  return String(disk && (disk.id || disk.name) || "")
+}
+
+function copyNumberArrays(value) {
+  var copied = {}
+  if (!value || typeof value !== "object") return copied
+  for (var key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key) || !Array.isArray(value[key]))
+      continue
+    copied[key] = value[key].slice()
+  }
+  return copied
+}
+
 function aggregateDisks(disks) {
   var values = Array.isArray(disks) ? disks : []
   var selected = []
   var read = 0
   var written = 0
   for (var i = 0; i < values.length; i++) {
-    selected.push(values[i].id || values[i].name)
+    selected.push(diskId(values[i]))
     read += number(values[i].read)
     written += number(values[i].written)
   }
@@ -622,6 +681,195 @@ function aggregateDisks(disks) {
     read: read,
     written: written
   }
+}
+
+function compareDiskName(left, right) {
+  var a = String(left && left.name || "")
+  var b = String(right && right.name || "")
+  if (a < b) return -1
+  if (a > b) return 1
+  var leftId = diskId(left)
+  var rightId = diskId(right)
+  if (leftId < rightId) return -1
+  if (leftId > rightId) return 1
+  return 0
+}
+
+function diskDeviceRates(previous, current, seconds) {
+  var previousDisks = previous && Array.isArray(previous.disks) ? previous.disks : []
+  var currentDisks = current && Array.isArray(current.disks) ? current.disks : []
+  var before = {}
+  for (var i = 0; i < previousDisks.length; i++) before[diskId(previousDisks[i])] = previousDisks[i]
+
+  var devices = []
+  var read = 0
+  var written = 0
+  for (var j = 0; j < currentDisks.length; j++) {
+    var disk = currentDisks[j]
+    var id = diskId(disk)
+    var prior = id ? before[id] : null
+    var deviceRead = seconds > 0 && prior ? counterRate(prior.read, disk.read, seconds) : 0
+    var deviceWrite = seconds > 0 && prior ? counterRate(prior.written, disk.written, seconds) : 0
+    devices.push({
+      id: id,
+      name: String(disk.name || id),
+      read: deviceRead,
+      write: deviceWrite
+    })
+    read += deviceRead
+    written += deviceWrite
+  }
+  devices.sort(compareDiskName)
+  return {
+    devices: devices,
+    read: read,
+    write: written
+  }
+}
+
+function nextDiskHistories(oldHistories, devices, allRead, allWrite, historyLimit) {
+  var previous = copyNumberArrays(oldHistories)
+  var next = {
+    all: appendHistory(previous.all, number(allRead) + number(allWrite), historyLimit)
+  }
+  var values = Array.isArray(devices) ? devices : []
+  for (var i = 0; i < values.length; i++) {
+    var id = diskId(values[i])
+    if (!id) continue
+    next[id] = appendHistory(previous[id], number(values[i].read) + number(values[i].write), historyLimit)
+  }
+  return next
+}
+
+function diskCycleItems(metrics) {
+  var values = metrics || emptyMetrics()
+  var devices = Array.isArray(values.diskDevices) ? values.diskDevices : []
+  var histories = values.diskHistories || {}
+  if (devices.length <= 1) {
+    if (devices.length === 0) {
+      return [{
+        id: "all",
+        name: "All",
+        read: number(values.diskRead),
+        write: number(values.diskWrite),
+        history: Array.isArray(values.diskHistory) ? values.diskHistory : []
+      }]
+    }
+    return [{
+      id: devices[0].id,
+      name: devices[0].name,
+      read: number(devices[0].read),
+      write: number(devices[0].write),
+      history: Array.isArray(values.diskHistory) ? values.diskHistory : []
+    }]
+  }
+
+  var items = [{
+    id: "all",
+    name: "All",
+    read: number(values.diskRead),
+    write: number(values.diskWrite),
+    history: Array.isArray(values.diskHistory) ? values.diskHistory : []
+  }]
+  for (var i = 0; i < devices.length; i++) {
+    var id = diskId(devices[i])
+    items.push({
+      id: id,
+      name: String(devices[i].name || id),
+      read: number(devices[i].read),
+      write: number(devices[i].write),
+      history: Array.isArray(histories[id]) ? histories[id] : []
+    })
+  }
+  return items
+}
+
+function selectDiskItem(items, selectedId) {
+  var values = Array.isArray(items) ? items : []
+  if (values.length === 0) return null
+  var wanted = String(selectedId || "")
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i].id) === wanted) return values[i]
+  }
+  return values[0]
+}
+
+function storageVolumes(snapshot) {
+  var volumes = snapshot && Array.isArray(snapshot.volumes) ? snapshot.volumes.slice() : []
+  if (volumes.length === 0 && snapshot && number(snapshot.total) > 0) {
+    volumes.push(boundedStorageVolume(
+      snapshot.path,
+      snapshot.total,
+      snapshot.used,
+      snapshot.available
+    ))
+  }
+  volumes.sort(compareStoragePath)
+  return volumes
+}
+
+function storageUsedFraction(volume) {
+  var total = number(volume && volume.total)
+  if (total <= 0) return 0
+  return clamp(number(volume.used) / total, 0, 1)
+}
+
+function tightestStorageVolume(volumes) {
+  var values = Array.isArray(volumes) ? volumes : []
+  var best = null
+  var bestFraction = -1
+  for (var i = 0; i < values.length; i++) {
+    var fraction = storageUsedFraction(values[i])
+    if (!best || fraction > bestFraction || (fraction === bestFraction && values[i].path === "/")) {
+      best = values[i]
+      bestFraction = fraction
+    }
+  }
+  return best
+}
+
+function selectStorageVolume(volumes, selectedPath, pinned) {
+  var values = Array.isArray(volumes) ? volumes : []
+  if (values.length === 0) return null
+  if (pinned) {
+    var wanted = String(selectedPath || "")
+    for (var i = 0; i < values.length; i++) {
+      if (String(values[i].path) === wanted) return values[i]
+    }
+  }
+  return tightestStorageVolume(values) || values[0]
+}
+
+function storageVolumeLabel(path) {
+  var value = String(path || "")
+  if (!value || value === "/") return "/"
+  var trimmed = value.replace(/\/+$/, "")
+  var slash = trimmed.lastIndexOf("/")
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed
+}
+
+function nextCycleIndex(length, current, delta) {
+  var count = Math.max(0, Math.round(number(length)))
+  if (count <= 0) return 0
+  var step = Math.round(number(delta, 1))
+  if (step === 0) step = 1
+  return ((Math.round(number(current)) + step) % count + count) % count
+}
+
+function cycleItemId(items, currentId, key, delta) {
+  var values = Array.isArray(items) ? items : []
+  var field = key || "id"
+  if (values.length === 0) return ""
+  if (values.length === 1) return String(values[0][field] || "")
+  var wanted = String(currentId || "")
+  var index = 0
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][field]) === wanted) {
+      index = i
+      break
+    }
+  }
+  return String(values[nextCycleIndex(values.length, index, delta)][field] || "")
 }
 
 // A counter-based metric needs two samples. While the fresh baseline is being
@@ -644,7 +892,9 @@ function baselineMetrics(current, existing) {
     cpuHistory: Array.isArray(old.cpuHistory) ? old.cpuHistory.slice() : [],
     memoryHistory: Array.isArray(old.memoryHistory) ? old.memoryHistory.slice() : [],
     networkHistory: Array.isArray(old.networkHistory) ? old.networkHistory.slice() : [],
-    diskHistory: Array.isArray(old.diskHistory) ? old.diskHistory.slice() : []
+    diskHistory: Array.isArray(old.diskHistory) ? old.diskHistory.slice() : [],
+    diskDevices: Array.isArray(old.diskDevices) ? old.diskDevices.slice() : [],
+    diskHistories: copyNumberArrays(old.diskHistories)
   }
 }
 
@@ -663,11 +913,14 @@ function nextMetrics(previous, current, existing, historyLimit) {
   var upload = seconds > 0 && previousNetwork
     ? counterRate(previousNetwork.transmitted, network.transmitted, seconds)
     : 0
-  var disk = aggregateDisks(current.disks)
-  var previousDisk = aggregateDisks(previous && previous.disks)
-  var sameDisks = disk.signature !== "" && disk.signature === previousDisk.signature
-  var diskRead = seconds > 0 && sameDisks ? counterRate(previousDisk.read, disk.read, seconds) : 0
-  var diskWrite = seconds > 0 && sameDisks ? counterRate(previousDisk.written, disk.written, seconds) : 0
+  var disks = diskDeviceRates(previous, current, seconds)
+  var diskHistories = nextDiskHistories(
+    old.diskHistories,
+    disks.devices,
+    disks.read,
+    disks.write,
+    historyLimit
+  )
 
   return {
     cpu: cpu,
@@ -675,14 +928,16 @@ function nextMetrics(previous, current, existing, historyLimit) {
     swap: swapPercent(current.memory),
     download: download,
     upload: upload,
-    diskRead: diskRead,
-    diskWrite: diskWrite,
+    diskRead: disks.read,
+    diskWrite: disks.write,
     networkInterface: network ? network.name : "",
     cores: coreUsage(previous, current),
     cpuHistory: appendHistory(old.cpuHistory, cpu, historyLimit),
     memoryHistory: appendHistory(old.memoryHistory, memory, historyLimit),
     networkHistory: appendHistory(old.networkHistory, download + upload, historyLimit),
-    diskHistory: appendHistory(old.diskHistory, diskRead + diskWrite, historyLimit)
+    diskHistory: diskHistories.all || [],
+    diskDevices: disks.devices,
+    diskHistories: diskHistories
   }
 }
 
@@ -1577,7 +1832,18 @@ if (typeof module !== "undefined") {
     appendHistory: appendHistory,
     coreUsage: coreUsage,
     selectNetwork: selectNetwork,
+    diskId: diskId,
     aggregateDisks: aggregateDisks,
+    diskDeviceRates: diskDeviceRates,
+    diskCycleItems: diskCycleItems,
+    selectDiskItem: selectDiskItem,
+    storageVolumes: storageVolumes,
+    storageUsedFraction: storageUsedFraction,
+    tightestStorageVolume: tightestStorageVolume,
+    selectStorageVolume: selectStorageVolume,
+    storageVolumeLabel: storageVolumeLabel,
+    nextCycleIndex: nextCycleIndex,
+    cycleItemId: cycleItemId,
     baselineMetrics: baselineMetrics,
     nextMetrics: nextMetrics,
     nextProcesses: nextProcesses,
