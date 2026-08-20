@@ -832,6 +832,7 @@ Panel {
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
       }
     }
   }
@@ -1018,6 +1019,8 @@ Panel {
     id: expandedContent
 
     Column {
+      id: expandedPage
+
       width: contentLoader.width
       spacing: Style.spacing.panelGap
 
@@ -1165,9 +1168,21 @@ Panel {
       }
 
       Item {
+        id: processListHost
+
         width: parent.width
-        height: Style.space(300)
+        height: Math.max(Style.space(120), Style.space(300) - processFooterReserve)
         clip: true
+
+        // Expanded height is capped; shrink the list so the footer stays in-card.
+        readonly property int processFooterReserve: {
+          var extra = 0
+          if (endProcessHost.visible)
+            extra += Math.max(0, endProcessHost.implicitHeight) + expandedPage.spacing
+          if (expandedHint.visible)
+            extra += Math.max(0, expandedHint.implicitHeight) + expandedPage.spacing
+          return extra
+        }
 
         ListView {
           id: processList
@@ -1216,8 +1231,11 @@ Panel {
       }
 
       Item {
+        id: endProcessHost
+
         width: parent.width
-        height: endProcessButton.visible ? endProcessButton.implicitHeight : 0
+        implicitHeight: endProcessButton.visible ? endProcessButton.implicitHeight : 0
+        height: implicitHeight
         visible: endProcessButton.visible
 
         Button {
@@ -1248,6 +1266,7 @@ Panel {
       }
 
       Text {
+        id: expandedHint
         width: parent.width
         visible: processActions.status !== "" || root.hintsVisible
         text: processActions.status || root.shortcutHintText()
@@ -1256,6 +1275,7 @@ Panel {
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
       }
     }
   }
